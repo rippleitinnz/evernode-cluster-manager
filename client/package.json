@@ -1,0 +1,9 @@
+{
+  "name": "v3.0-client",
+  "version": "3.0.0",
+  "dependencies": {
+    "adm-zip": "0.5.10",
+    "dotenv": "16.4.5",
+    "hotpocket-js-client": "0.5.7"
+  }
+}

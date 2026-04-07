@@ -1,0 +1,8 @@
+node_modules/
+bundle/
+*.zip
+config/.env
+cluster-info.json
+node-override-temp.cfg
+*.hcache
+.DS_Store
