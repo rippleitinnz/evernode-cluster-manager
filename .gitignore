@@ -6,3 +6,5 @@ cluster-info.json
 node-override-temp.cfg
 *.hcache
 .DS_Store
+client/*.bak
+client/*.v2*
