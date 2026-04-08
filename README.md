@@ -46,8 +46,8 @@ On first run it shows a project selector. Each project is an independent cluster
 
   Select a project:
 
-    1. my-game             contract: 6664322e… | nodes: 3
-    2. defi-app            contract: 9396fdf2… | nodes: 4
+    1. my-game             contract: 6664322e… | nodes tracked: 3
+    2. defi-app            contract: 9396fdf2… | nodes tracked: 4
     3. nft-platform        no cluster yet
     4. Create new project
     5. Exit
@@ -97,7 +97,7 @@ Select a node by index or pubkey. Will not remove if cluster would drop below 3 
 
 **Option 5 — Check node expiry**
 
-Shows time remaining for each tracked node. Nodes are tracked when added via option 3.
+Shows time remaining for each tracked node. All nodes are tracked automatically — both from initial deployment and any nodes added via option 3.
 
 **Option 6 — Extend node lease**
 
