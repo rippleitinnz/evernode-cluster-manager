@@ -143,6 +143,114 @@ Each project is completely independent — different credentials, different cont
 
 **Node tracking:** Nodes added via option 3 are saved to `cluster-nodes.json` with their lease details. Stale entries are removed automatically when they leave the UNL.
 
+## Contract Interface Specification
+
+For the cluster manager to fully manage a cluster, the deployed contract must implement the following input handlers. Contracts that do not implement these handlers can still be deployed and monitored, but live updates, node addition and node removal will not be available.
+
+### Required handlers
+
+All handlers receive a JSON input from the authorized user public key and must respond with a JSON output.
+
+**`status`**
+
+Returns current contract state. No timestamp or non-deterministic values — all nodes must produce identical output.
+
+Input:
+```json
+{ "type": "status" }
+```
+
+Output:
+```json
+{
+  "type": "status",
+  "version": "v1.0.0",
+  "lclSeqNo": 100,
+  "unlCount": 3,
+  "unl": ["ed123...", "ed456...", "ed789..."]
+}
+```
+
+**`updateContract`**
+
+Receives a base64-encoded zip bundle and extracts it over the current contract files. New code is active from the next round.
+
+Input:
+```json
+{
+  "type": "updateContract",
+  "newVersion": "v1.0.1",
+  "bundle": "<base64 encoded zip>"
+}
+```
+
+Output:
+```json
+{
+  "type": "updateContract",
+  "version": "v1.0.0",
+  "lclSeqNo": 100,
+  "status": "ok"
+}
+```
+
+**`addNode`**
+
+Adds a new pubkey to the UNL and initiates a peer connection. No restart required.
+
+Input:
+```json
+{
+  "type": "addNode",
+  "pubkey": "ed...",
+  "ip": "host.example.com",
+  "peerPort": 22861
+}
+```
+
+Output:
+```json
+{
+  "type": "addNode",
+  "addedPubkey": "ed...",
+  "newUnlCount": 4,
+  "lclSeqNo": 100
+}
+```
+
+**`removeNode`**
+
+Removes a pubkey from the UNL. Minimum 2 nodes must remain after removal.
+
+Input:
+```json
+{
+  "type": "removeNode",
+  "pubkey": "ed..."
+}
+```
+
+Output:
+```json
+{
+  "type": "removeNode",
+  "removedPubkey": "ed...",
+  "newUnlCount": 3,
+  "lclSeqNo": 100
+}
+```
+
+### Critical rules
+
+- **No timestamps in outputs** — `new Date()` or any non-deterministic value in contract outputs will cause output hash mismatches across nodes and break consensus
+- **Authorization** — all management handlers must verify the sender's public key against an authorized key stored in the contract state
+- **Version field required** — `ctx.updateConfig()` requires the `version` field to be present at the top level of the config object
+- **`forceTerminate: true`** — pass `true` as the third argument to `hpc.init()` to ensure clean round exit after config changes
+
+### Reference implementation
+
+The default contract template at `contract/index.js` in this repository is a fully working reference implementation of all four handlers.
+
 ## Important Notes
 
 - Always delete old instances before deploying a new cluster to the same host — running clusters can corrupt the UNL of new nodes during the sync window
