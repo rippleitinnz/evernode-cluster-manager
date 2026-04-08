@@ -183,7 +183,9 @@ const parseEvmOutput = (raw) => {
 
 const findHosts = async (minSlots = 1, targetCount = 20) => {
     const batchSize = 15;
-    console.log(`\n  Scanning for ${targetCount} active hosts with >= ${minSlots} slot(s)...\n`);
+    console.log(`\n  Scanning for ${targetCount} active hosts with >= ${minSlots} slot(s)...`);
+    console.log(`  Note: The Evernode network has 15,000+ registered hosts, most inactive.`);
+    console.log(`  Hosts are checked in batches of 15 — this typically takes 1-2 minutes.\n`);    
     const get = (url) => new Promise((resolve, reject) => {
         https.get(url, res => { let d=''; res.on('data',c=>d+=c); res.on('end',()=>{ try{resolve(JSON.parse(d));}catch(e){reject(e);} }); }).on('error', reject);
     });
