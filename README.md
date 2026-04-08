@@ -67,14 +67,18 @@ node ~/evernode_client/client/cluster-manager.js evernode.onledger.net 26202 666
 ```
 
 Shows current cluster status on startup then presents a menu:
-What would you like to do?
-1. Check status
-2. Update contract
-3. Add a node
-4. Remove a node
-5. Exit
+```
+  What would you like to do?
+    1. Check status
+    2. Update contract
+    3. Add a node
+    4. Remove a node
+    5. Exit
+```
+
 **Option 1 — Check status**
-Shows vote status, UNL nodes, peers and LCL. `voteStatus: synced` confirms healthy consensus.
+
+Shows vote status, UNL nodes, peers and LCL.
 
 **Option 2 — Update contract**
 Enter a new version string (e.g. `v1.0.1`). Bundles and deploys live across all nodes. No restarts, consensus maintained.
