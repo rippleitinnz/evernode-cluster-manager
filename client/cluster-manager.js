@@ -201,7 +201,7 @@ const getContractVersion = async (targetIp, targetPort) => {
         const done = (val) => {
             if (!resolved) { resolved = true; client.close().catch(() => {}); resolve(val); }
         };
-        const timer = setTimeout(() => done('unknown'), 10000);
+        const timer = setTimeout(() => done('unknown'), Math.max(20000, parseInt(process.env.HP_ROUNDTIME||5000) * 3));
         client.on(HP.events.contractOutput, (r) => {
             for (const o of r.outputs) {
                 try { const p = JSON.parse(o); if (p.version) { clearTimeout(timer); done(p.version); } } catch {}
@@ -229,12 +229,80 @@ const parseEvmOutput = (raw) => {
 
 // ── Host Finder ───────────────────────────────────────────────
 
+
+// ── Batch XAH + EVR balance check ─────────────────────────────
+const checkBalances = (addresses) => new Promise((resolve) => {
+    const WS = require('/usr/lib/node_modules/evdevkit/node_modules/ws');
+    const results = {};
+    addresses.forEach(a => { results[a] = { xah: 0, evr: 0 }; });
+    if (!addresses.length) { resolve(results); return; }
+    let ws;
+    try { ws = new WS('wss://xahau.network'); } catch { resolve(results); return; }
+    let pending = addresses.length * 2;
+    const finish = () => { try { ws.close(); } catch {} resolve(results); };
+    const timer = setTimeout(finish, 20000);
+    const dec = () => { if (--pending <= 0) { clearTimeout(timer); finish(); } };
+    ws.on('open', () => {
+        addresses.forEach(addr => {
+            ws.send(JSON.stringify({ command:'account_info',  account:addr, ledger_index:'current', id:'info_'+addr  }));
+            ws.send(JSON.stringify({ command:'account_lines', account:addr, ledger_index:'current', id:'lines_'+addr }));
+        });
+    });
+    ws.on('message', (data) => {
+        try {
+            const r = JSON.parse(data);
+            if (r.id && r.id.startsWith('info_')) {
+                const addr = r.id.replace('info_','');
+                if (r.result && r.result.account_data) results[addr].xah = parseInt(r.result.account_data.Balance)/1000000;
+                dec();
+            } else if (r.id && r.id.startsWith('lines_')) {
+                const addr = r.id.replace('lines_','');
+                const evr = r.result && r.result.lines && r.result.lines.find(l=>l.currency==='EVR');
+                if (evr) results[addr].evr = parseFloat(evr.balance);
+                dec();
+            }
+        } catch { dec(); }
+    });
+    ws.on('error', () => { clearTimeout(timer); resolve(results); });
+});
+
+// ── Batch reputation check via registry client ─────────────────
+const checkReputation = async (addresses) => {
+    const results = {};
+    addresses.forEach(a => { results[a] = null; });
+    if (!addresses.length) return results;
+    try {
+        const evernode = require('/usr/lib/node_modules/evdevkit/node_modules/evernode-js-client');
+        await evernode.Defaults.useNetwork('mainnet');
+        const xrplApi = new evernode.XrplApi();
+        evernode.Defaults.set({ xrplApi, useCentralizedRegistry: true });
+        await xrplApi.connect();
+        const reg = await evernode.HookClientFactory.create(evernode.HookTypes.registry);
+        await reg.connect();
+        await Promise.all(addresses.map(async addr => {
+            try {
+                const info = await reg.getHostInfo(addr);
+                results[addr] = (info && info.hostReputation !== undefined) ? info.hostReputation : null;
+            } catch { results[addr] = null; }
+        }));
+        await reg.disconnect();
+        await xrplApi.disconnect();
+    } catch(e) { console.error('  Warning: Reputation check failed:', e.message); }
+    return results;
+};
+
+// ── Host Finder ───────────────────────────────────────────────
 const findHosts = async (minSlots = 1, targetCount = 20) => {
     const batchSize = 15;
     const MAX_SCAN  = 300;
-    console.log(`\n  Scanning for ${targetCount} active hosts with >= ${minSlots} slot(s)...`);
+    const MIN_XAH   = 5;
+    const MIN_EVR   = 1;
+    const MIN_REP   = 200;
+
+    console.log('\n  Scanning for ' + targetCount + ' active hosts with >= ' + minSlots + ' slot(s)...');
+    console.log('  Filters: slots >= ' + minSlots + ' | XAH >= ' + MIN_XAH + ' | EVR >= ' + MIN_EVR + ' | reputation >= ' + MIN_REP + '/255');
     console.log('  Note: The Evernode network has 15,000+ registered hosts, most inactive.');
-    console.log('  Hosts are checked in batches of 15 — this typically takes 1-2 minutes.');
+    console.log('  Hosts are checked in batches — this typically takes 2-3 minutes.');
     console.log('  Press Ctrl+C to stop early and show results so far.\n');
 
     const get = (url) => new Promise((resolve, reject) => {
@@ -245,7 +313,7 @@ const findHosts = async (minSlots = 1, targetCount = 20) => {
     const data = await get('https://xahau.xrplwin.com/api/evernode/hosts');
     const priceMap = {};
     const allHosts = data.data.filter(h=>h.leaseprice_evr_drops!==null&&h.host).map(h=>{ priceMap[h.host]=h.leaseprice_evr_drops; return h.host; });
-    console.log(` ${allHosts.length} registered hosts.`);
+    console.log(' ' + allHosts.length + ' registered hosts.');
 
     const shuffled = allHosts.sort(()=>Math.random()-0.5);
     const found=[]; const checked=new Set(); let idx=0,batchNum=0,cancelled=false;
@@ -261,30 +329,72 @@ const findHosts = async (minSlots = 1, targetCount = 20) => {
         }
         if (!batch.length) break;
         batchNum++;
-        process.stdout.write(`  Batch ${String(batchNum).padStart(2)} | Checked: ${checked.size}/${MAX_SCAN} | Found: ${found.length}/${targetCount}\r`);
+        process.stdout.write('  Batch ' + String(batchNum).padStart(2) + ' | Checked: ' + checked.size + '/' + MAX_SCAN + ' | Found: ' + found.length + '/' + targetCount + '\r');
+
         const tmpFile='/tmp/ecm-hosts-batch.txt';
-        fs.writeFileSync(tmpFile,batch.join('\n'));
+        fs.writeFileSync(tmpFile, batch.join('\n'));
         const result=spawnSync('evdevkit',['hostinfo','-f',tmpFile],{encoding:'utf8',timeout:60000});
         try{fs.unlinkSync(tmpFile);}catch{}
         const info=parseEvmOutput(result.stdout||'');
-        if (Array.isArray(info)) info.filter(h=>h.active&&h.availableInstanceSlots>=minSlots).forEach(h=>{ h.leasePrice=priceMap[h.address]||null; found.push(h); });
+        if (!Array.isArray(info)) continue;
+
+        const candidates = info.filter(h=>h.active&&h.availableInstanceSlots>=minSlots);
+        if (!candidates.length) continue;
+
+        const addrs = candidates.map(h=>h.address);
+        process.stdout.write('  Batch ' + String(batchNum).padStart(2) + ' | Checking ' + addrs.length + ' candidates (balance + reputation)...\r');
+
+        const [balances, reputations] = await Promise.all([
+            checkBalances(addrs),
+            checkReputation(addrs)
+        ]);
+
+        for (const h of candidates) {
+            const bal = balances[h.address] || { xah:0, evr:0 };
+            const rep = reputations[h.address];
+            if (bal.xah < MIN_XAH) continue;
+            if (bal.evr < MIN_EVR) continue;
+            if (rep !== null && rep < MIN_REP) continue;
+            h.leasePrice = priceMap[h.address]||null;
+            h.xahBalance = bal.xah;
+            h.evrBalance = bal.evr;
+            h.reputation = rep;
+            found.push(h);
+        }
     }
 
     process.removeListener('SIGINT', sigHandler);
 
     if (checked.size>=MAX_SCAN&&found.length<targetCount)
-        console.log(`\n  Reached scan limit of ${MAX_SCAN} hosts. Showing ${found.length} results.`);
+        console.log('\n  Reached scan limit of ' + MAX_SCAN + ' hosts. Showing ' + found.length + ' results.');
     else
-        console.log(`\n  Found ${found.length} active host(s).`);
+        console.log('\n  Found ' + found.length + ' verified host(s).');
     console.log('');
 
-    found.sort((a,b)=>b.availableInstanceSlots-a.availableInstanceSlots||(a.leasePrice||0)-(b.leasePrice||0));
-    const fmtEVR=(d)=>{ if(!d)return'free?'; const e=d/1000000; if(e<0.001)return`${d}drops`; if(e<1)return`${e.toFixed(4)} EVR`; return`${e.toFixed(2)} EVR`; };
-    console.log('  '+hr(112));
-    console.log('  '+'#'.padEnd(4)+'Address'.padEnd(36)+'Domain'.padEnd(25)+'CC'.padEnd(5)+'Avail'.padEnd(7)+'Total'.padEnd(7)+'RAM'.padEnd(12)+'Lease/hr'.padEnd(12)+'Version');
-    console.log('  '+hr(112));
-    found.forEach((h,i)=>console.log('  '+String(i+1).padEnd(4)+(h.address||'').padEnd(36)+(h.domain||'').slice(0,23).padEnd(25)+(h.countryCode||'??').padEnd(5)+String(h.availableInstanceSlots||0).padEnd(7)+String(h.totalInstanceSlots||0).padEnd(7)+(h.ram||'').slice(0,10).padEnd(12)+fmtEVR(h.leasePrice).padEnd(12)+(h.sashimonoVersion||'?')));
-    console.log('  '+hr(112));
+    if (!found.length) { console.log('  No hosts passed all filters.'); return found; }
+
+    found.sort((a,b)=>(b.reputation||0)-(a.reputation||0)||(b.availableInstanceSlots-a.availableInstanceSlots)||(a.leasePrice||0)-(b.leasePrice||0));
+
+    const fmtEVR=(d)=>{ if(!d)return'free?'; const e=d/1000000; if(e<0.001)return d+'drops'; if(e<1)return e.toFixed(4)+' EVR'; return e.toFixed(2)+' EVR'; };
+    const fmtRep=(r)=>r===null?'?':String(r);
+
+    console.log('  '+hr(124));
+    console.log('  '+'#'.padEnd(4)+'Address'.padEnd(36)+'Domain'.padEnd(25)+'CC'.padEnd(5)+'Avail'.padEnd(7)+'Rep'.padEnd(6)+'XAH'.padEnd(8)+'EVR'.padEnd(8)+'Lease/hr'.padEnd(12)+'Version');
+    console.log('  '+hr(124));
+    found.forEach((h,i)=>console.log(
+        '  '+String(i+1).padEnd(4)+
+        (h.address||'').padEnd(36)+
+        (h.domain||'').slice(0,23).padEnd(25)+
+        (h.countryCode||'??').padEnd(5)+
+        String(h.availableInstanceSlots||0).padEnd(7)+
+        fmtRep(h.reputation).padEnd(6)+
+        (h.xahBalance||0).toFixed(1).padEnd(8)+
+        (h.evrBalance||0).toFixed(1).padEnd(8)+
+        fmtEVR(h.leasePrice).padEnd(12)+
+        (h.sashimonoVersion||'?')
+    ));
+    console.log('  '+hr(124));
+    console.log('\n  ' + found.length + ' host(s) verified — active, funded and reputation >= ' + MIN_REP + '.\n');
     return found;
 };
 
