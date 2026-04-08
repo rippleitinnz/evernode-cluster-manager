@@ -120,6 +120,7 @@ Select a node by index or enter "all" to extend all nodes. Specify how many addi
 - Node lease details are tracked in `config/cluster-nodes.json` — this file is auto-updated when nodes are added, removed or extended. It is reconciled against the live UNL on every startup.
 
 ## File Structure
+```
 evernode-cluster-manager/
 ├── setup.sh                <- run once to configure everything
 ├── contract/
@@ -132,9 +133,11 @@ evernode-cluster-manager/
 │   └── package.json
 └── config/
 └── .env.example        <- template, setup.sh generates the real .env
+```
 ## Your Project Directory
 
 After running `setup.sh`, your project directory (e.g. `~/evernode_client`) contains:
+```
 evernode_client/
 ├── config/
 │   ├── .env            <- your credentials and settings (never commit)
@@ -142,3 +145,4 @@ evernode_client/
 │   └── hp.cfg.override <- applied when bundling
 ├── contract/           <- your contract code
 └── client/             <- deploy and management tools
+```
