@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Evernode Cluster Manager
+ * Evernode Cluster Manager v2.1.0
  *
  * Single tool for deploying and managing multiple HotPocket cluster projects.
  * No host access required.
@@ -9,6 +9,8 @@
  */
 
 'use strict';
+
+const TOOL_VERSION = 'v2.1.0';
 
 const path         = require('path');
 const fs           = require('fs');
@@ -19,9 +21,10 @@ const vm           = require('vm');
 const os           = require('os');
 
 // ── Tool and projects paths ───────────────────────────────────
-const TOOL_DIR      = path.dirname(__dirname);
-const TOOL_CONTRACT = path.join(TOOL_DIR, 'contract');
-const PROJECTS_DIR  = path.join(os.homedir(), '.evernode-clusters', 'projects');
+const TOOL_DIR       = path.dirname(__dirname);
+const TOOL_CONTRACT  = path.join(TOOL_DIR, 'contract');
+const PROJECTS_DIR   = path.join(os.homedir(), '.evernode-clusters', 'projects');
+const GLOBAL_ENV     = path.join(os.homedir(), '.evernode-clusters', '.env');
 const MOMENT_SECONDS = 3600;
 
 // ── Current project state (set at runtime) ────────────────────
@@ -47,6 +50,33 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const fmt = () => new Date().toISOString().replace('T',' ').replace(/\..+/,'');
 const hr = (n=52) => '─'.repeat(n);
 
+// ── Global env ────────────────────────────────────────────────
+
+const loadGlobalEnv = () => {
+    if (fs.existsSync(GLOBAL_ENV)) {
+        require('dotenv').config({ path: GLOBAL_ENV });
+    }
+};
+
+const saveGlobalEnv = (data) => {
+    const lines = [
+        '# Evernode Cluster Manager — Global Credentials',
+        '# Shared across all projects. Created: ' + new Date().toUTCString(),
+        '',
+        `EV_TENANT_SECRET=${data.tenantSecret}`,
+        `EV_TENANT_ADDRESS=${data.tenantAddress}`,
+        `EV_USER_PRIVATE_KEY=${data.userPrivKey}`,
+        `EV_USER_PUBLIC_KEY=${data.userPubKey}`,
+    ].join('\n') + '\n';
+    fs.writeFileSync(GLOBAL_ENV, lines, { mode: 0o600 });
+};
+
+const hasGlobalEnv = () => {
+    if (!fs.existsSync(GLOBAL_ENV)) return false;
+    const env = fs.readFileSync(GLOBAL_ENV, 'utf8');
+    return env.includes('EV_TENANT_SECRET=') && env.includes('EV_USER_PRIVATE_KEY=');
+};
+
 // ── Project management ────────────────────────────────────────
 
 const getProjects = () => {
@@ -69,8 +99,8 @@ const getProjects = () => {
 };
 
 const loadProjectEnv = () => {
-    // Clear any previously loaded env vars that might conflict
-    delete require.cache[require.resolve('dotenv')];
+    // Load global env first, then project env overrides
+    loadGlobalEnv();
     require('dotenv').config({ path: ENV_FILE, override: true });
 };
 
@@ -161,12 +191,30 @@ const sendInput = async (targetIp, targetPort, msg, expectedType, waitMs = 15000
     });
 };
 
-// Get contract version by sending status input to contract
+// Get contract version — non-blocking, times out cleanly
 const getContractVersion = async (targetIp, targetPort) => {
-    try {
-        const result = await sendInput(targetIp, targetPort, { type: 'status' }, 'status', 12000);
-        return result.version || 'unknown';
-    } catch { return 'unknown'; }
+    const HP = require('hotpocket-js-client');
+    const keyPair = await getKeyPair();
+    const client = await HP.createClient([`wss://${targetIp}:${targetPort}`], keyPair, { protocol: HP.protocols.json });
+    return new Promise(async (resolve) => {
+        let resolved = false;
+        const done = (val) => {
+            if (!resolved) { resolved = true; client.close().catch(() => {}); resolve(val); }
+        };
+        const timer = setTimeout(() => done('unknown'), 10000);
+        client.on(HP.events.contractOutput, (r) => {
+            for (const o of r.outputs) {
+                try { const p = JSON.parse(o); if (p.version) { clearTimeout(timer); done(p.version); } } catch {}
+            }
+        });
+        client.on(HP.events.disconnect, () => { clearTimeout(timer); done('unknown'); });
+        try {
+            const connected = await client.connect();
+            if (!connected) { clearTimeout(timer); done('unknown'); return; }
+            const submission = await client.submitContractInput(JSON.stringify({ type: 'status' }));
+            await submission.submissionStatus;
+        } catch { clearTimeout(timer); done('unknown'); }
+    });
 };
 
 const stripAnsi = (str) => str.replace(/\u001b\[[0-9;]*m/g, '');
@@ -183,30 +231,53 @@ const parseEvmOutput = (raw) => {
 
 const findHosts = async (minSlots = 1, targetCount = 20) => {
     const batchSize = 15;
-    console.log(`\n  Scanning for ${targetCount} active hosts with >= ${minSlots} slot(s)...\n`);
+    const MAX_SCAN  = 300;
+    console.log(`\n  Scanning for ${targetCount} active hosts with >= ${minSlots} slot(s)...`);
+    console.log('  Note: The Evernode network has 15,000+ registered hosts, most inactive.');
+    console.log('  Hosts are checked in batches of 15 — this typically takes 1-2 minutes.');
+    console.log('  Press Ctrl+C to stop early and show results so far.\n');
+
     const get = (url) => new Promise((resolve, reject) => {
         https.get(url, res => { let d=''; res.on('data',c=>d+=c); res.on('end',()=>{ try{resolve(JSON.parse(d));}catch(e){reject(e);} }); }).on('error', reject);
     });
+
     process.stdout.write('  Fetching host list...');
     const data = await get('https://xahau.xrplwin.com/api/evernode/hosts');
     const priceMap = {};
     const allHosts = data.data.filter(h=>h.leaseprice_evr_drops!==null&&h.host).map(h=>{ priceMap[h.host]=h.leaseprice_evr_drops; return h.host; });
     console.log(` ${allHosts.length} registered hosts.`);
+
     const shuffled = allHosts.sort(()=>Math.random()-0.5);
-    const found=[]; const checked=new Set(); let idx=0,batchNum=0;
-    while (found.length<targetCount&&idx<shuffled.length) {
+    const found=[]; const checked=new Set(); let idx=0,batchNum=0,cancelled=false;
+
+    const sigHandler = () => { cancelled=true; console.log('\n\n  Scan stopped — showing results so far...'); };
+    process.once('SIGINT', sigHandler);
+
+    while (found.length<targetCount&&idx<shuffled.length&&checked.size<MAX_SCAN&&!cancelled) {
         const batch=[];
-        while (batch.length<batchSize&&idx<shuffled.length) { if(!checked.has(shuffled[idx])){batch.push(shuffled[idx]);checked.add(shuffled[idx]);} idx++; }
+        while (batch.length<batchSize&&idx<shuffled.length) {
+            if(!checked.has(shuffled[idx])){batch.push(shuffled[idx]);checked.add(shuffled[idx]);}
+            idx++;
+        }
         if (!batch.length) break;
         batchNum++;
-        process.stdout.write(`  Batch ${String(batchNum).padStart(2)} | Checked: ${checked.size} | Found: ${found.length}/${targetCount}\r`);
-        const tmpFile='/tmp/ecm-hosts-batch.txt'; fs.writeFileSync(tmpFile,batch.join('\n'));
+        process.stdout.write(`  Batch ${String(batchNum).padStart(2)} | Checked: ${checked.size}/${MAX_SCAN} | Found: ${found.length}/${targetCount}\r`);
+        const tmpFile='/tmp/ecm-hosts-batch.txt';
+        fs.writeFileSync(tmpFile,batch.join('\n'));
         const result=spawnSync('evdevkit',['hostinfo','-f',tmpFile],{encoding:'utf8',timeout:60000});
         try{fs.unlinkSync(tmpFile);}catch{}
         const info=parseEvmOutput(result.stdout||'');
         if (Array.isArray(info)) info.filter(h=>h.active&&h.availableInstanceSlots>=minSlots).forEach(h=>{ h.leasePrice=priceMap[h.address]||null; found.push(h); });
     }
-    console.log(`\n  Found ${found.length} active host(s).\n`);
+
+    process.removeListener('SIGINT', sigHandler);
+
+    if (checked.size>=MAX_SCAN&&found.length<targetCount)
+        console.log(`\n  Reached scan limit of ${MAX_SCAN} hosts. Showing ${found.length} results.`);
+    else
+        console.log(`\n  Found ${found.length} active host(s).`);
+    console.log('');
+
     found.sort((a,b)=>b.availableInstanceSlots-a.availableInstanceSlots||(a.leasePrice||0)-(b.leasePrice||0));
     const fmtEVR=(d)=>{ if(!d)return'free?'; const e=d/1000000; if(e<0.001)return`${d}drops`; if(e<1)return`${e.toFixed(4)} EVR`; return`${e.toFixed(2)} EVR`; };
     console.log('  '+hr(112));
@@ -217,25 +288,15 @@ const findHosts = async (minSlots = 1, targetCount = 20) => {
     return found;
 };
 
-// ── Project Setup ─────────────────────────────────────────────
+// ── Global credentials setup ──────────────────────────────────
 
-const createProject = async () => {
-    console.log('\n── New Project Setup ────────────────────────────────');
-
-    let projectName;
-    while (true) {
-        projectName = (await ask('  Project name (e.g. my-app): ')).trim().toLowerCase().replace(/[^a-z0-9-]/g,'-');
-        if (!projectName) { console.log('  Cannot be empty.'); continue; }
-        if (fs.existsSync(path.join(PROJECTS_DIR, projectName))) { console.log(`  Project "${projectName}" already exists.`); continue; }
-        break;
-    }
-
-    const projectDir = path.join(PROJECTS_DIR, projectName);
-    fs.mkdirSync(path.join(projectDir, 'contract'), { recursive: true });
-    setProject(projectDir);
+const setupGlobalCredentials = async () => {
+    console.log('\n── Global Credentials Setup ─────────────────────────');
+    console.log('  These credentials are shared across all projects.');
+    console.log('  You only need to enter them once.\n');
 
     // Keys
-    console.log('\n── Key Generation ────────────────────────────────────');
+    console.log('── Key Generation ────────────────────────────────────');
     const hasKeys = (await ask('  Have existing HotPocket user keys? (yes/y or Enter to generate): ')).trim();
     let userPrivKey='', userPubKey='';
     if (hasKeys==='yes'||hasKeys==='y') {
@@ -261,6 +322,28 @@ const createProject = async () => {
     const tenantSecret  = (await ask('  EV_TENANT_SECRET : ')).trim();
     const tenantAddress = (await ask('  EV_TENANT_ADDRESS: ')).trim();
 
+    saveGlobalEnv({ tenantSecret, tenantAddress, userPrivKey, userPubKey });
+    loadGlobalEnv();
+    console.log(`\n  ✓ Global credentials saved to ${GLOBAL_ENV}`);
+};
+
+// ── Project Setup ─────────────────────────────────────────────
+
+const createProject = async () => {
+    console.log('\n── New Project Setup ────────────────────────────────');
+
+    let projectName;
+    while (true) {
+        projectName = (await ask('  Project name (e.g. my-app): ')).trim().toLowerCase().replace(/[^a-z0-9-]/g,'-');
+        if (!projectName) { console.log('  Cannot be empty.'); continue; }
+        if (fs.existsSync(path.join(PROJECTS_DIR, projectName))) { console.log(`  Project "${projectName}" already exists.`); continue; }
+        break;
+    }
+
+    const projectDir = path.join(PROJECTS_DIR, projectName);
+    fs.mkdirSync(path.join(projectDir, 'contract'), { recursive: true });
+    setProject(projectDir);
+
     // HotPocket settings
     console.log('\n── HotPocket Settings ────────────────────────────────');
     const roundtime     = (await ask('  Round time ms     (default 5000): ')).trim()||'5000';
@@ -277,7 +360,7 @@ const createProject = async () => {
     // Contract source
     console.log('\n── Contract Source ───────────────────────────────────');
     console.log('  1. Use default cluster management contract (recommended)');
-    console.log('  2. Use my own contract');
+    console.log('  2. Use my own contract directory');
     console.log('');
     let contractSrcDir = TOOL_CONTRACT;
     while (true) {
@@ -292,14 +375,10 @@ const createProject = async () => {
         }
     }
 
-    // Write .env
+    // Write project .env (no credentials — those are in global .env)
     fs.writeFileSync(ENV_FILE, `# Evernode Cluster Manager — Project: ${projectName}
 # Created: ${new Date().toUTCString()}
-
-EV_TENANT_SECRET=${tenantSecret}
-EV_TENANT_ADDRESS=${tenantAddress}
-EV_USER_PRIVATE_KEY=${userPrivKey}
-EV_USER_PUBLIC_KEY=${userPubKey}
+# Note: Credentials are stored in ~/.evernode-clusters/.env
 
 DEFAULT_NODE_COUNT=${defaultNodes}
 DEFAULT_MOMENTS=${defaultMoments}
@@ -321,9 +400,13 @@ CONTRACT_VERSION=${contractVersion}
     const overrideCfg = { contract: { bin_path:'/usr/bin/node', bin_args:'index.js', consensus:{ roundtime:parseInt(roundtime), threshold:parseInt(threshold) } } };
     fs.writeFileSync(path.join(projectDir, 'hp.cfg.override'), JSON.stringify(overrideCfg, null, 2));
 
-    // Copy contract files
+    // Copy contract files (skip node_modules and directories)
     for (const f of fs.readdirSync(contractSrcDir)) {
-        fs.copyFileSync(path.join(contractSrcDir, f), path.join(CONTRACT_DIR, f));
+        if (f === 'node_modules' || f === '.git') continue;
+        const src = path.join(contractSrcDir, f);
+        const dst = path.join(CONTRACT_DIR, f);
+        if (fs.statSync(src).isDirectory()) continue;
+        fs.copyFileSync(src, dst);
     }
     // Always use project's hp.cfg.override in contract dir
     fs.copyFileSync(path.join(projectDir, 'hp.cfg.override'), path.join(CONTRACT_DIR, 'hp.cfg.override'));
@@ -410,7 +493,7 @@ const opDeploy = async () => {
     let clusterOutput = '';
     try {
         clusterOutput = execSync(
-            `bash -c 'set -a; source ${ENV_FILE}; set +a; unset EV_HP_OVERRIDE_CFG_PATH; export EV_HP_INIT_CFG_PATH=${INITCFG}; sudo -E evdevkit cluster-create ${nodeCount} -m ${moments} ${CONTRACT_DIR} /usr/bin/node ${hostsFile} -a index.js'`,
+            `bash -c 'set -a; source ${GLOBAL_ENV} 2>/dev/null; source ${ENV_FILE}; set +a; unset EV_HP_OVERRIDE_CFG_PATH; export EV_HP_INIT_CFG_PATH=${INITCFG}; sudo -E evdevkit cluster-create ${nodeCount} -m ${moments} ${CONTRACT_DIR} /usr/bin/node ${hostsFile} -a index.js'`,
             { encoding:'utf8' }
         );
         process.stdout.write(clusterOutput);
@@ -430,12 +513,10 @@ const opDeploy = async () => {
         ip         = (await ask('  Node IP/domain: ')).trim();
         port       = (await ask('  Node user port: ')).trim();
     } else {
-        // Extract from parsed nodes
         contractId = nodes[0].contract_id;
         ip         = nodes[0].domain;
         port       = String(nodes[0].user_port);
 
-        // Save all nodes to cluster-nodes.json
         const nodeRecords = nodes.map(n => ({
             pubkey           : n.pubkey,
             name             : n.name,
@@ -470,11 +551,7 @@ const opStatus = async () => {
         const reconciled = reconcileNodes(nodes, stat.currentUnl);
         if (reconciled.length!==nodes.length) { saveNodes(reconciled); nodes=reconciled; }
 
-        // Get contract version from contract
-        let contractVersion = 'fetching...';
-        try {
-            contractVersion = await getContractVersion(ip, port);
-        } catch { contractVersion = 'unknown'; }
+        const contractVersion = await getContractVersion(ip, port);
 
         console.log('\n── Cluster Status ───────────────────────────────────');
         console.log(`  Project          : ${path.basename(PROJECT_DIR)}`);
@@ -550,7 +627,10 @@ const opAddNode = async () => {
 
     let acquireOutput;
     try {
-        acquireOutput=execSync(`bash -c 'set -a; source ${ENV_FILE}; set +a; unset EV_HP_OVERRIDE_CFG_PATH; sudo -E evdevkit acquire ${extHost} -m ${moments} -c ${contractId}'`,{encoding:'utf8'});
+        acquireOutput=execSync(
+            `bash -c 'set -a; source ${GLOBAL_ENV} 2>/dev/null; source ${ENV_FILE}; set +a; unset EV_HP_OVERRIDE_CFG_PATH; sudo -E evdevkit acquire ${extHost} -m ${moments} -c ${contractId}'`,
+            {encoding:'utf8'}
+        );
         console.log(acquireOutput);
     } catch(e) { console.error(`  ✗ Acquire failed: ${e.message}`); return; }
 
@@ -573,13 +653,19 @@ const opAddNode = async () => {
 
     console.log('\n  ── STEP 3: Bundle ────────────────────────────────');
     try {
-        execSync(`bash -c 'set -a; source ${ENV_FILE}; set +a; export EV_HP_OVERRIDE_CFG_PATH=${overridePath}; sudo -E evdevkit bundle ${CONTRACT_DIR} ${pub} /usr/bin/node -a index.js'`,{encoding:'utf8',cwd:PROJECT_DIR});
+        execSync(
+            `bash -c 'set -a; source ${GLOBAL_ENV} 2>/dev/null; source ${ENV_FILE}; set +a; export EV_HP_OVERRIDE_CFG_PATH=${overridePath}; sudo -E evdevkit bundle ${CONTRACT_DIR} ${pub} /usr/bin/node -a index.js'`,
+            {encoding:'utf8',cwd:PROJECT_DIR}
+        );
         console.log('  ✓ Bundle created.');
     } catch(e) { console.error(`  ✗ Bundle failed: ${e.message}`); fs.unlinkSync(overridePath); return; }
 
     console.log('\n  ── STEP 4: Deploy ────────────────────────────────');
     try {
-        const out=execSync(`bash -c 'set -a; source ${ENV_FILE}; set +a; sudo -E evdevkit deploy ${PROJECT_DIR}/bundle/bundle.zip ${dom} ${user}'`,{encoding:'utf8'});
+        const out=execSync(
+            `bash -c 'set -a; source ${GLOBAL_ENV} 2>/dev/null; source ${ENV_FILE}; set +a; sudo -E evdevkit deploy ${PROJECT_DIR}/bundle/bundle.zip ${dom} ${user}'`,
+            {encoding:'utf8'}
+        );
         console.log(out);
         if (!out.includes('Contract bundle uploaded')) { console.error('  ✗ Deploy may have failed.'); fs.unlinkSync(overridePath); return; }
         console.log('  ✓ Bundle deployed.');
@@ -595,8 +681,8 @@ const opAddNode = async () => {
         saveNodes(nodes);
         console.log('  ✓ Saved to cluster-nodes.json');
         await waitForSync(ip,port,result.newUnlCount,90000);
-        const fs2=await getStatus(ip,port);
-        console.log(`\n  Vote Status: ${fs2.voteStatus} | UNL: ${fs2.currentUnl.length} | Peers: ${fs2.peers.join(', ')}`);
+        const finalStat=await getStatus(ip,port);
+        console.log(`\n  Vote Status: ${finalStat.voteStatus} | UNL: ${finalStat.currentUnl.length} | Peers: ${finalStat.peers.join(', ')}`);
     } catch(e) { console.error(`\n  ✗ Add node failed: ${e.message}`); }
     console.log('─────────────────────────────────────────────────────\n');
 };
@@ -667,7 +753,10 @@ const opExtendLease = async () => {
         if (!node.name||!node.host) { console.log(`  ✗ ${node.pubkey.slice(0,20)}… — missing details.`); continue; }
         process.stdout.write(`  Extending ${node.pubkey.slice(0,20)}… by ${addMoments} moment(s)...`);
         try {
-            execSync(`bash -c 'set -a; source ${ENV_FILE}; set +a; sudo -E evdevkit extend-instance ${node.host} ${node.name} -m ${addMoments}'`,{encoding:'utf8'});
+            execSync(
+                `bash -c 'set -a; source ${GLOBAL_ENV} 2>/dev/null; source ${ENV_FILE}; set +a; sudo -E evdevkit extend-instance ${node.host} ${node.name} -m ${addMoments}'`,
+                {encoding:'utf8'}
+            );
             node.lifeMoments+=addMoments;
             console.log(` ✓ Total: ${node.lifeMoments} moments.`);
         } catch(e) { console.log(` ✗ ${e.message}`); }
@@ -695,7 +784,7 @@ const selectProject = async () => {
 
     console.log('  Select a project:\n');
     projects.forEach((p,i) => {
-        const status = p.contractId ? `contract: ${p.contractId.slice(0,8)}… | nodes tracked: ${p.nodeCount}` : 'no cluster yet';
+        const status = p.contractId ? `contract: ${p.contractId.slice(0,8)}… | ${p.lastNode||'no node saved'}` : 'no cluster yet';
         console.log(`    ${i+1}. ${p.name.padEnd(22)} ${status}`);
     });
     console.log(`    ${projects.length+1}. Create new project`);
@@ -767,7 +856,7 @@ const managementMenu = async () => {
 const main = async () => {
     console.log('');
     console.log('╔══════════════════════════════════════════════════════╗');
-    console.log('║          Evernode Cluster Manager                   ║');
+    console.log(`║     Evernode Cluster Manager  ${TOOL_VERSION}            ║`);
     console.log('╚══════════════════════════════════════════════════════╝');
 
     fs.mkdirSync(PROJECTS_DIR, { recursive: true });
@@ -778,6 +867,15 @@ const main = async () => {
         console.log('\n  Installing dependencies...');
         execSync(`npm install --prefix ${path.join(TOOL_DIR, 'client')} --silent`);
         console.log('  ✓ Done\n');
+    }
+
+    // Check for global credentials — ask once if not set
+    if (!hasGlobalEnv()) {
+        console.log('\n  Welcome! First time setup — enter your credentials once.');
+        console.log('  They will be reused across all projects.\n');
+        await setupGlobalCredentials();
+    } else {
+        loadGlobalEnv();
     }
 
     while (true) {
