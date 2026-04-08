@@ -2,7 +2,7 @@
 /**
  * Evernode Cluster Manager
  *
- * Single tool for managing multiple HotPocket cluster projects.
+ * Single tool for deploying and managing multiple HotPocket cluster projects.
  * No host access required.
  *
  * Usage: node cluster-manager.js
@@ -19,10 +19,9 @@ const vm           = require('vm');
 const os           = require('os');
 
 // ── Tool and projects paths ───────────────────────────────────
-const TOOL_DIR      = path.dirname(__dirname);                          // where the tool is cloned
-const TOOL_CONTRACT = path.join(TOOL_DIR, 'contract');                  // template contract
+const TOOL_DIR      = path.dirname(__dirname);
+const TOOL_CONTRACT = path.join(TOOL_DIR, 'contract');
 const PROJECTS_DIR  = path.join(os.homedir(), '.evernode-clusters', 'projects');
-
 const MOMENT_SECONDS = 3600;
 
 // ── Current project state (set at runtime) ────────────────────
@@ -46,7 +45,6 @@ const rl  = readline.createInterface({ input: process.stdin, output: process.std
 const ask = (q) => new Promise(resolve => rl.question(q, resolve));
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const fmt = () => new Date().toISOString().replace('T',' ').replace(/\..+/,'');
-
 const hr = (n=52) => '─'.repeat(n);
 
 // ── Project management ────────────────────────────────────────
@@ -62,33 +60,25 @@ const getProjects = () => {
             let contractId = '', nodeCount = 0, lastNode = '';
             try {
                 const env = fs.readFileSync(envFile, 'utf8');
-                contractId = (env.match(/CONTRACT_ID=(.+)/) || [])[1] || '';
-                lastNode   = (env.match(/LAST_NODE=(.+)/) || [])[1] || '';
+                contractId = (env.match(/^CONTRACT_ID=(.+)$/m) || [])[1] || '';
+                lastNode   = (env.match(/^LAST_NODE=(.+)$/m) || [])[1] || '';
             } catch {}
-            try {
-                const nodes = JSON.parse(fs.readFileSync(nodesFile, 'utf8'));
-                nodeCount = nodes.length;
-            } catch {}
+            try { nodeCount = JSON.parse(fs.readFileSync(nodesFile, 'utf8')).length; } catch {}
             return { name, dir, contractId, nodeCount, lastNode };
         });
 };
 
 const loadProjectEnv = () => {
-    require('dotenv').config({ path: ENV_FILE });
+    // Clear any previously loaded env vars that might conflict
+    delete require.cache[require.resolve('dotenv')];
+    require('dotenv').config({ path: ENV_FILE, override: true });
 };
 
 const saveProjectMeta = (meta) => {
-    // Update .env with contract ID and last node for display
     let env = fs.readFileSync(ENV_FILE, 'utf8');
-    if (meta.contractId) {
-        env = env.replace(/^CONTRACT_ID=.*$/m, '');
-        env += `\nCONTRACT_ID=${meta.contractId}`;
-    }
-    if (meta.lastNode) {
-        env = env.replace(/^LAST_NODE=.*$/m, '');
-        env += `\nLAST_NODE=${meta.lastNode}`;
-    }
-    fs.writeFileSync(ENV_FILE, env);
+    if (meta.contractId) { env = env.replace(/^CONTRACT_ID=.*\n?/m, ''); env += `\nCONTRACT_ID=${meta.contractId}`; }
+    if (meta.lastNode)   { env = env.replace(/^LAST_NODE=.*\n?/m, '');   env += `\nLAST_NODE=${meta.lastNode}`; }
+    fs.writeFileSync(ENV_FILE, env.trim() + '\n');
 };
 
 // ── Node tracking ─────────────────────────────────────────────
@@ -158,13 +148,25 @@ const sendInput = async (targetIp, targetPort, msg, expectedType, waitMs = 15000
         if (!connected) { reject(new Error('Connection failed')); return; }
         const submission = await client.submitContractInput(JSON.stringify(msg));
         const inputStatus = await submission.submissionStatus;
-        if (inputStatus.status !== 'accepted') { await client.close().catch(() => {}); reject(new Error(`Input rejected: ${inputStatus.reason}`)); return; }
+        if (inputStatus.status !== 'accepted') {
+            await client.close().catch(() => {});
+            reject(new Error(`Input rejected: ${inputStatus.reason}`));
+            return;
+        }
         await sleep(waitMs);
         await client.close().catch(() => {});
         if (!result) reject(new Error('No response received'));
         else if (result.type === 'error') reject(new Error(result.message));
         else resolve(result);
     });
+};
+
+// Get contract version by sending status input to contract
+const getContractVersion = async (targetIp, targetPort) => {
+    try {
+        const result = await sendInput(targetIp, targetPort, { type: 'status' }, 'status', 12000);
+        return result.version || 'unknown';
+    } catch { return 'unknown'; }
 };
 
 const stripAnsi = (str) => str.replace(/\u001b\[[0-9;]*m/g, '');
@@ -224,8 +226,7 @@ const createProject = async () => {
     while (true) {
         projectName = (await ask('  Project name (e.g. my-app): ')).trim().toLowerCase().replace(/[^a-z0-9-]/g,'-');
         if (!projectName) { console.log('  Cannot be empty.'); continue; }
-        const projectDir = path.join(PROJECTS_DIR, projectName);
-        if (fs.existsSync(projectDir)) { console.log(`  Project "${projectName}" already exists. Choose another name.`); continue; }
+        if (fs.existsSync(path.join(PROJECTS_DIR, projectName))) { console.log(`  Project "${projectName}" already exists.`); continue; }
         break;
     }
 
@@ -267,11 +268,29 @@ const createProject = async () => {
     const logLevel      = (await ask('  Log level         (default dbg)  : ')).trim()||'dbg';
     const peerDiscovery = (await ask('  Peer discovery    (default false) : ')).trim()||'false';
 
-    // Contract
+    // Contract settings
     console.log('\n── Contract Settings ─────────────────────────────────');
     const contractVersion = (await ask('  Starting version  (default v1.0.0): ')).trim()||'v1.0.0';
     const defaultNodes    = (await ask('  Default node count(default 3)      : ')).trim()||'3';
     const defaultMoments  = (await ask('  Default moments   (default 3)      : ')).trim()||'3';
+
+    // Contract source
+    console.log('\n── Contract Source ───────────────────────────────────');
+    console.log('  1. Use default cluster management contract (recommended)');
+    console.log('  2. Use my own contract');
+    console.log('');
+    let contractSrcDir = TOOL_CONTRACT;
+    while (true) {
+        const choice = (await ask('  Choice (1 or 2): ')).trim();
+        if (choice === '1') { contractSrcDir = TOOL_CONTRACT; break; }
+        if (choice === '2') {
+            const customPath = (await ask('  Path to your contract directory: ')).trim();
+            if (fs.existsSync(customPath) && fs.statSync(customPath).isDirectory()) {
+                contractSrcDir = customPath; break;
+            }
+            console.log('  Directory not found. Try again.');
+        }
+    }
 
     // Write .env
     fs.writeFileSync(ENV_FILE, `# Evernode Cluster Manager — Project: ${projectName}
@@ -299,29 +318,37 @@ CONTRACT_VERSION=${contractVersion}
     }, null, 2));
 
     // Write hp.cfg.override
-    fs.writeFileSync(path.join(projectDir, 'hp.cfg.override'), JSON.stringify({
-        contract: { bin_path:'/usr/bin/node', bin_args:'index.js', consensus:{ roundtime:parseInt(roundtime), threshold:parseInt(threshold) } }
-    }, null, 2));
+    const overrideCfg = { contract: { bin_path:'/usr/bin/node', bin_args:'index.js', consensus:{ roundtime:parseInt(roundtime), threshold:parseInt(threshold) } } };
+    fs.writeFileSync(path.join(projectDir, 'hp.cfg.override'), JSON.stringify(overrideCfg, null, 2));
 
-    // Copy contract template
-    for (const f of fs.readdirSync(TOOL_CONTRACT)) {
-        fs.copyFileSync(path.join(TOOL_CONTRACT, f), path.join(CONTRACT_DIR, f));
+    // Copy contract files
+    for (const f of fs.readdirSync(contractSrcDir)) {
+        fs.copyFileSync(path.join(contractSrcDir, f), path.join(CONTRACT_DIR, f));
     }
+    // Always use project's hp.cfg.override in contract dir
     fs.copyFileSync(path.join(projectDir, 'hp.cfg.override'), path.join(CONTRACT_DIR, 'hp.cfg.override'));
-    let idx = fs.readFileSync(path.join(CONTRACT_DIR, 'index.js'), 'utf8');
-    idx = idx.replace(/const CONTRACT_VERSION\s+=\s+'[^']+'/, `const CONTRACT_VERSION       = '${contractVersion}'`);
-    fs.writeFileSync(path.join(CONTRACT_DIR, 'index.js'), idx);
+
+    // Update version in index.js if it has CONTRACT_VERSION
+    const idxPath = path.join(CONTRACT_DIR, 'index.js');
+    if (fs.existsSync(idxPath)) {
+        let idx = fs.readFileSync(idxPath, 'utf8');
+        if (idx.includes('CONTRACT_VERSION')) {
+            idx = idx.replace(/const CONTRACT_VERSION\s+=\s+'[^']+'/, `const CONTRACT_VERSION       = '${contractVersion}'`);
+            fs.writeFileSync(idxPath, idx);
+        }
+    }
 
     // Install contract dependencies
-    console.log('\n  Installing contract dependencies...');
-    execSync(`npm install --prefix ${CONTRACT_DIR} --silent`);
-    console.log('  ✓ Done');
+    if (fs.existsSync(path.join(CONTRACT_DIR, 'package.json'))) {
+        console.log('\n  Installing contract dependencies...');
+        execSync(`npm install --prefix ${CONTRACT_DIR} --silent`);
+        console.log('  ✓ Done');
+    }
 
     loadProjectEnv();
 
     console.log('\n  ✓ Project created successfully.');
     console.log(`  Location: ${projectDir}\n`);
-
     return projectName;
 };
 
@@ -379,23 +406,57 @@ const opDeploy = async () => {
     const hostsFile='/tmp/ecm-deploy-hosts.txt';
     fs.writeFileSync(hostsFile, hostAddrs.join('\n'));
 
-    console.log('[3/3] Running evdevkit cluster-create...');
+    console.log('[3/3] Running evdevkit cluster-create...\n');
+    let clusterOutput = '';
     try {
-        execSync(
+        clusterOutput = execSync(
             `bash -c 'set -a; source ${ENV_FILE}; set +a; unset EV_HP_OVERRIDE_CFG_PATH; export EV_HP_INIT_CFG_PATH=${INITCFG}; sudo -E evdevkit cluster-create ${nodeCount} -m ${moments} ${CONTRACT_DIR} /usr/bin/node ${hostsFile} -a index.js'`,
-            { encoding:'utf8', stdio:'inherit' }
+            { encoding:'utf8' }
         );
-    } catch(e) { console.error('\n  ✗ cluster-create failed'); try{fs.unlinkSync(hostsFile);}catch{}; return false; }
+        process.stdout.write(clusterOutput);
+    } catch(e) {
+        console.error('\n  ✗ cluster-create failed');
+        try{fs.unlinkSync(hostsFile);}catch{}
+        return false;
+    }
     try{fs.unlinkSync(hostsFile);}catch{}
 
-    console.log('');
-    contractId = (await ask('  Enter the contract ID from the output above: ')).trim();
-    if (!contractId) { console.log('  No contract ID entered.'); return false; }
-    ip   = (await ask('  Enter the IP/domain of one node: ')).trim();
-    port = (await ask('  Enter its user port: ')).trim();
+    // Auto-parse cluster output
+    console.log('\n  Parsing cluster output...');
+    const nodes = parseEvmOutput(clusterOutput);
+    if (!Array.isArray(nodes) || nodes.length === 0) {
+        console.log('  ⚠ Could not auto-parse output. Please enter details manually.');
+        contractId = (await ask('  Contract ID: ')).trim();
+        ip         = (await ask('  Node IP/domain: ')).trim();
+        port       = (await ask('  Node user port: ')).trim();
+    } else {
+        // Extract from parsed nodes
+        contractId = nodes[0].contract_id;
+        ip         = nodes[0].domain;
+        port       = String(nodes[0].user_port);
+
+        // Save all nodes to cluster-nodes.json
+        const nodeRecords = nodes.map(n => ({
+            pubkey           : n.pubkey,
+            name             : n.name,
+            host             : n.host,
+            domain           : n.domain,
+            userPort         : parseInt(n.user_port),
+            peerPort         : parseInt(n.peer_port),
+            createdTimestamp : n.created_timestamp,
+            lifeMoments      : n.life_moments
+        }));
+        saveNodes(nodeRecords);
+
+        console.log(`  ✓ Contract ID : ${contractId}`);
+        console.log(`  ✓ Connecting  : ${ip}:${port}`);
+        console.log(`  ✓ Saved ${nodeRecords.length} node(s) to cluster-nodes.json`);
+    }
+
+    if (!contractId||!ip||!port) { console.log('  ✗ Missing cluster details.'); return false; }
 
     saveProjectMeta({ contractId, lastNode:`${ip}:${port}` });
-    console.log('\n  ✓ Cluster deployed and project updated.');
+    console.log('\n  ✓ Cluster deployed and project updated.\n');
     return true;
 };
 
@@ -408,16 +469,25 @@ const opStatus = async () => {
         let nodes = loadNodes();
         const reconciled = reconcileNodes(nodes, stat.currentUnl);
         if (reconciled.length!==nodes.length) { saveNodes(reconciled); nodes=reconciled; }
+
+        // Get contract version from contract
+        let contractVersion = 'fetching...';
+        try {
+            contractVersion = await getContractVersion(ip, port);
+        } catch { contractVersion = 'unknown'; }
+
         console.log('\n── Cluster Status ───────────────────────────────────');
-        console.log(`  HP Version   : ${stat.hpVersion}`);
-        console.log(`  Vote Status  : ${stat.voteStatus}`);
-        console.log(`  LCL          : ${stat.ledgerSeqNo}`);
-        console.log(`  Round Time   : ${stat.roundTime}ms`);
-        console.log(`  Contract ID  : ${contractId}`);
-        console.log(`  UNL Count    : ${stat.currentUnl.length}`);
-        console.log('  UNL Nodes    :');
+        console.log(`  Project          : ${path.basename(PROJECT_DIR)}`);
+        console.log(`  Contract ID      : ${contractId}`);
+        console.log(`  Contract Version : ${contractVersion}`);
+        console.log(`  HP Version       : ${stat.hpVersion}`);
+        console.log(`  Vote Status      : ${stat.voteStatus}`);
+        console.log(`  LCL              : ${stat.ledgerSeqNo}`);
+        console.log(`  Round Time       : ${stat.roundTime}ms`);
+        console.log(`  UNL Count        : ${stat.currentUnl.length}`);
+        console.log('  UNL Nodes        :');
         stat.currentUnl.forEach((pk,i)=>{ const n=nodes.find(n=>n.pubkey===pk); console.log(`    [${i}] ${pk}${n?` (${timeRemaining(n).text})`:''}`); });
-        console.log('  Peers        :');
+        console.log('  Peers            :');
         stat.peers.forEach(p=>console.log(`    ${p}`));
         console.log('─────────────────────────────────────────────────────\n');
         return stat;
@@ -440,7 +510,11 @@ const opUpdateContract = async () => {
     const indexPath=path.join(CONTRACT_DIR,'index.js');
     let code=fs.readFileSync(indexPath,'utf8');
     const cur=(code.match(/const CONTRACT_VERSION\s+=\s+'([^']+)'/)||[])[1];
-    if (cur) { code=code.replace(`const CONTRACT_VERSION       = '${cur}'`,`const CONTRACT_VERSION       = '${newVersion}'`); fs.writeFileSync(indexPath,code); console.log(`  Updated: ${cur} → ${newVersion}`); }
+    if (cur) {
+        code=code.replace(`const CONTRACT_VERSION       = '${cur}'`,`const CONTRACT_VERSION       = '${newVersion}'`);
+        fs.writeFileSync(indexPath,code);
+        console.log(`  Updated: ${cur} → ${newVersion}`);
+    }
 
     const zip=new AdmZip(); zip.addLocalFolder(CONTRACT_DIR);
     const buf=zip.toBuffer();
@@ -491,12 +565,17 @@ const opAddNode = async () => {
     console.log('\n  ── STEP 2: Override config ───────────────────────');
     const allPubkeys=[...stat.currentUnl,pub];
     const overridePath=path.join(PROJECT_DIR,'node-override-temp.cfg');
-    fs.writeFileSync(overridePath,JSON.stringify({contract:{bin_path:'/usr/bin/node',bin_args:'index.js',consensus:{roundtime:parseInt(process.env.HP_ROUNDTIME||5000),threshold:parseInt(process.env.HP_THRESHOLD||66)},unl:allPubkeys},mesh:{peer_discovery:{enabled:process.env.HP_PEER_DISCOVERY==='true'},known_peers:stat.peers}},null,2));
+    fs.writeFileSync(overridePath,JSON.stringify({
+        contract:{bin_path:'/usr/bin/node',bin_args:'index.js',consensus:{roundtime:parseInt(process.env.HP_ROUNDTIME||5000),threshold:parseInt(process.env.HP_THRESHOLD||66)},unl:allPubkeys},
+        mesh:{peer_discovery:{enabled:process.env.HP_PEER_DISCOVERY==='true'},known_peers:stat.peers}
+    },null,2));
     console.log(`  ✓ ${allPubkeys.length} nodes in UNL`);
 
     console.log('\n  ── STEP 3: Bundle ────────────────────────────────');
-    try { execSync(`bash -c 'set -a; source ${ENV_FILE}; set +a; export EV_HP_OVERRIDE_CFG_PATH=${overridePath}; sudo -E evdevkit bundle ${CONTRACT_DIR} ${pub} /usr/bin/node -a index.js'`,{encoding:'utf8',cwd:PROJECT_DIR}); console.log('  ✓ Bundle created.'); }
-    catch(e) { console.error(`  ✗ Bundle failed: ${e.message}`); fs.unlinkSync(overridePath); return; }
+    try {
+        execSync(`bash -c 'set -a; source ${ENV_FILE}; set +a; export EV_HP_OVERRIDE_CFG_PATH=${overridePath}; sudo -E evdevkit bundle ${CONTRACT_DIR} ${pub} /usr/bin/node -a index.js'`,{encoding:'utf8',cwd:PROJECT_DIR});
+        console.log('  ✓ Bundle created.');
+    } catch(e) { console.error(`  ✗ Bundle failed: ${e.message}`); fs.unlinkSync(overridePath); return; }
 
     console.log('\n  ── STEP 4: Deploy ────────────────────────────────');
     try {
@@ -511,8 +590,10 @@ const opAddNode = async () => {
     try {
         const result=await sendInput(ip,port,{type:'addNode',pubkey:pub,ip:dom,peerPort:parseInt(peer)},'addNode',15000);
         console.log(`\n  ✓ Node added. UNL=${result.newUnlCount} LCL=${result.lclSeqNo}`);
-        const nodes=loadNodes(); nodes.push({pubkey:pub,name,host:extHost,domain:dom,userPort:parseInt(user),peerPort:parseInt(peer),createdTimestamp:ts,lifeMoments:parseInt(moments)});
-        saveNodes(nodes); console.log('  ✓ Saved to cluster-nodes.json');
+        const nodes=loadNodes();
+        nodes.push({pubkey:pub,name,host:extHost,domain:dom,userPort:parseInt(user),peerPort:parseInt(peer),createdTimestamp:ts,lifeMoments:parseInt(moments)});
+        saveNodes(nodes);
+        console.log('  ✓ Saved to cluster-nodes.json');
         await waitForSync(ip,port,result.newUnlCount,90000);
         const fs2=await getStatus(ip,port);
         console.log(`\n  Vote Status: ${fs2.voteStatus} | UNL: ${fs2.currentUnl.length} | Peers: ${fs2.peers.join(', ')}`);
@@ -554,7 +635,12 @@ const opRemoveNode = async () => {
 const opCheckExpiry = async () => {
     console.log('\n── Node Expiry ──────────────────────────────────────');
     const nodes=loadNodes();
-    if (!nodes.length) { console.log('  No node records found.\n  Records are created when nodes are added via option 3.'); console.log('─────────────────────────────────────────────────────\n'); return; }
+    if (!nodes.length) {
+        console.log('  No node records found.');
+        console.log('  Records are created when nodes are added via option 3 or when a cluster is deployed.');
+        console.log('─────────────────────────────────────────────────────\n');
+        return;
+    }
     console.log(`  Current time: ${new Date().toUTCString()}\n`);
     console.log('  '+hr(90));
     console.log('  '+'Pubkey'.padEnd(22)+'Domain'.padEnd(25)+'Moments'.padEnd(9)+'Remaining'.padEnd(12)+'Expires (UTC)');
@@ -580,8 +666,11 @@ const opExtendLease = async () => {
     for (const node of targets) {
         if (!node.name||!node.host) { console.log(`  ✗ ${node.pubkey.slice(0,20)}… — missing details.`); continue; }
         process.stdout.write(`  Extending ${node.pubkey.slice(0,20)}… by ${addMoments} moment(s)...`);
-        try { execSync(`bash -c 'set -a; source ${ENV_FILE}; set +a; sudo -E evdevkit extend-instance ${node.host} ${node.name} -m ${addMoments}'`,{encoding:'utf8'}); node.lifeMoments+=addMoments; console.log(` ✓ Total: ${node.lifeMoments} moments.`); }
-        catch(e) { console.log(` ✗ ${e.message}`); }
+        try {
+            execSync(`bash -c 'set -a; source ${ENV_FILE}; set +a; sudo -E evdevkit extend-instance ${node.host} ${node.name} -m ${addMoments}'`,{encoding:'utf8'});
+            node.lifeMoments+=addMoments;
+            console.log(` ✓ Total: ${node.lifeMoments} moments.`);
+        } catch(e) { console.log(` ✗ ${e.message}`); }
     }
     saveNodes(nodes);
     console.log('\n  ✓ cluster-nodes.json updated.');
@@ -598,7 +687,6 @@ const opFindHosts = async () => {
 
 const selectProject = async () => {
     const projects = getProjects();
-
     console.log('');
     if (projects.length === 0) {
         console.log('  No projects found. Creating your first project...');
@@ -607,28 +695,24 @@ const selectProject = async () => {
 
     console.log('  Select a project:\n');
     projects.forEach((p,i) => {
-        const status = p.contractId ? `contract: ${p.contractId.slice(0,8)}… | nodes: ${p.nodeCount}` : 'no cluster yet';
-        console.log(`    ${i+1}. ${p.name.padEnd(20)} ${status}`);
+        const status = p.contractId ? `contract: ${p.contractId.slice(0,8)}… | nodes tracked: ${p.nodeCount}` : 'no cluster yet';
+        console.log(`    ${i+1}. ${p.name.padEnd(22)} ${status}`);
     });
     console.log(`    ${projects.length+1}. Create new project`);
     console.log(`    ${projects.length+2}. Exit`);
     console.log('');
 
     while (true) {
-        const input = (await ask('  Choice: ')).trim();
-        const idx = parseInt(input);
-        if (idx === projects.length+2) { rl.close(); process.exit(0); }
-        if (idx === projects.length+1) { return await createProject(); }
-        if (idx >= 1 && idx <= projects.length) {
-            const project = projects[idx-1];
+        const input=(await ask('  Choice: ')).trim();
+        const idx=parseInt(input);
+        if (idx===projects.length+2) { rl.close(); process.exit(0); }
+        if (idx===projects.length+1) { return await createProject(); }
+        if (idx>=1&&idx<=projects.length) {
+            const project=projects[idx-1];
             setProject(project.dir);
             loadProjectEnv();
-            // Restore last known node if available
-            if (project.lastNode) {
-                const parts = project.lastNode.split(':');
-                ip = parts[0]; port = parts[1];
-            }
-            if (project.contractId) contractId = project.contractId;
+            if (project.lastNode) { const parts=project.lastNode.split(':'); ip=parts[0]; port=parts[1]; }
+            if (project.contractId) contractId=project.contractId;
             console.log(`\n  ✓ Loaded project: ${project.name}`);
             return project.name;
         }
@@ -639,22 +723,12 @@ const selectProject = async () => {
 // ── Management menu ───────────────────────────────────────────
 
 const managementMenu = async () => {
-    // If no cluster yet, deploy first
-    if (!contractId || !ip || !port) {
+    if (!contractId||!ip||!port) {
         console.log('\n  No cluster deployed yet for this project.');
-        const deploy = (await ask('  Deploy a new cluster now? (yes/y or Enter to skip): ')).trim();
-        if (deploy==='yes'||deploy==='y') {
-            const deployed = await opDeploy();
-            if (!deployed) return;
-        } else {
-            console.log('  Returning to project selector...\n');
-            return;
-        }
+        const deploy=(await ask('  Deploy a new cluster now? (yes/y or Enter to skip): ')).trim();
+        if (deploy==='yes'||deploy==='y') { const ok=await opDeploy(); if (!ok) return; }
+        else { console.log('  Returning to project selector...\n'); return; }
     }
-
-    console.log(`\n  Project  : ${path.basename(PROJECT_DIR)}`);
-    console.log(`  Node     : ${ip}:${port}`);
-    console.log(`  Contract : ${contractId}\n`);
 
     await opStatus();
 
@@ -696,7 +770,6 @@ const main = async () => {
     console.log('║          Evernode Cluster Manager                   ║');
     console.log('╚══════════════════════════════════════════════════════╝');
 
-    // Ensure projects directory exists
     fs.mkdirSync(PROJECTS_DIR, { recursive: true });
 
     // Install client dependencies if needed
@@ -711,9 +784,8 @@ const main = async () => {
         await selectProject();
         const result = await managementMenu();
         if (result !== 'switch') break;
-        // Reset for project switch
-        ip = null; port = null; contractId = null;
-        PROJECT_DIR = null; ENV_FILE = null; NODES_FILE = null; CONTRACT_DIR = null; INITCFG = null;
+        ip=null; port=null; contractId=null;
+        PROJECT_DIR=null; ENV_FILE=null; NODES_FILE=null; CONTRACT_DIR=null; INITCFG=null;
         console.log('\n  Switching project...\n');
     }
 };
