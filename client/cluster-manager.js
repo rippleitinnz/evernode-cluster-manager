@@ -9,7 +9,7 @@
  */
 
 'use strict';
-const TOOL_VERSION = 'v2.0.0';
+
 const path         = require('path');
 const fs           = require('fs');
 const readline     = require('readline');
@@ -163,26 +163,10 @@ const sendInput = async (targetIp, targetPort, msg, expectedType, waitMs = 15000
 
 // Get contract version by sending status input to contract
 const getContractVersion = async (targetIp, targetPort) => {
-    const HP = require('hotpocket-js-client');
-    const keyPair = await getKeyPair();
-    const client = await HP.createClient([`wss://${targetIp}:${targetPort}`], keyPair, { protocol: HP.protocols.json });
-    return new Promise(async (resolve) => {
-        let resolved = false;
-        const done = (val) => { if (!resolved) { resolved=true; client.close().catch(()=>{}); resolve(val); } };
-        const timer = setTimeout(() => done('unknown'), 10000);
-        client.on(HP.events.contractOutput, (r) => {
-            for (const o of r.outputs) {
-                try { const p=JSON.parse(o); if (p.version) { clearTimeout(timer); done(p.version); } } catch {}
-            }
-        });
-        client.on(HP.events.disconnect, () => done('unknown'));
-        try {
-            const connected = await client.connect();
-            if (!connected) { clearTimeout(timer); done('unknown'); return; }
-            const submission = await client.submitContractInput(JSON.stringify({ type:'status' }));
-            await submission.submissionStatus;
-        } catch { clearTimeout(timer); done('unknown'); }
-    });
+    try {
+        const result = await sendInput(targetIp, targetPort, { type: 'status' }, 'status', 12000);
+        return result.version || 'unknown';
+    } catch { return 'unknown'; }
 };
 
 const stripAnsi = (str) => str.replace(/\u001b\[[0-9;]*m/g, '');
@@ -208,29 +192,21 @@ const findHosts = async (minSlots = 1, targetCount = 20) => {
     const priceMap = {};
     const allHosts = data.data.filter(h=>h.leaseprice_evr_drops!==null&&h.host).map(h=>{ priceMap[h.host]=h.leaseprice_evr_drops; return h.host; });
     console.log(` ${allHosts.length} registered hosts.`);
-    const MAX_SCAN = 300;
     const shuffled = allHosts.sort(()=>Math.random()-0.5);
-    const found=[]; const checked=new Set(); let idx=0,batchNum=0,cancelled=false;
-    const sigHandler = () => { cancelled=true; console.log('\n\n  Scan stopped — showing results so far...'); };
-    process.once('SIGINT', sigHandler);
-    while (found.length<targetCount&&idx<shuffled.length&&checked.size<MAX_SCAN&&!cancelled) {
+    const found=[]; const checked=new Set(); let idx=0,batchNum=0;
+    while (found.length<targetCount&&idx<shuffled.length) {
         const batch=[];
         while (batch.length<batchSize&&idx<shuffled.length) { if(!checked.has(shuffled[idx])){batch.push(shuffled[idx]);checked.add(shuffled[idx]);} idx++; }
         if (!batch.length) break;
         batchNum++;
-        process.stdout.write(`  Batch ${String(batchNum).padStart(2)} | Checked: ${checked.size}/${MAX_SCAN} | Found: ${found.length}/${targetCount} | Ctrl+C to stop\r`);
+        process.stdout.write(`  Batch ${String(batchNum).padStart(2)} | Checked: ${checked.size} | Found: ${found.length}/${targetCount}\r`);
         const tmpFile='/tmp/ecm-hosts-batch.txt'; fs.writeFileSync(tmpFile,batch.join('\n'));
         const result=spawnSync('evdevkit',['hostinfo','-f',tmpFile],{encoding:'utf8',timeout:60000});
         try{fs.unlinkSync(tmpFile);}catch{}
         const info=parseEvmOutput(result.stdout||'');
         if (Array.isArray(info)) info.filter(h=>h.active&&h.availableInstanceSlots>=minSlots).forEach(h=>{ h.leasePrice=priceMap[h.address]||null; found.push(h); });
     }
-    process.removeListener('SIGINT', sigHandler);
-    if (checked.size>=MAX_SCAN&&found.length<targetCount)
-        console.log(`\n  Reached scan limit of ${MAX_SCAN} hosts. Showing ${found.length} results.`);
-    else
-        console.log(`\n  Found ${found.length} active host(s).`);
-    console.log('');
+    console.log(`\n  Found ${found.length} active host(s).\n`);
     found.sort((a,b)=>b.availableInstanceSlots-a.availableInstanceSlots||(a.leasePrice||0)-(b.leasePrice||0));
     const fmtEVR=(d)=>{ if(!d)return'free?'; const e=d/1000000; if(e<0.001)return`${d}drops`; if(e<1)return`${e.toFixed(4)} EVR`; return`${e.toFixed(2)} EVR`; };
     console.log('  '+hr(112));
@@ -345,13 +321,9 @@ CONTRACT_VERSION=${contractVersion}
     const overrideCfg = { contract: { bin_path:'/usr/bin/node', bin_args:'index.js', consensus:{ roundtime:parseInt(roundtime), threshold:parseInt(threshold) } } };
     fs.writeFileSync(path.join(projectDir, 'hp.cfg.override'), JSON.stringify(overrideCfg, null, 2));
 
-    // Copy contract files (skip node_modules and directories)
+    // Copy contract files
     for (const f of fs.readdirSync(contractSrcDir)) {
-        if (f === 'node_modules' || f === '.git') continue;
-        const src = path.join(contractSrcDir, f);
-        const dst = path.join(CONTRACT_DIR, f);
-        if (fs.statSync(src).isDirectory()) continue;
-        fs.copyFileSync(src, dst);
+        fs.copyFileSync(path.join(contractSrcDir, f), path.join(CONTRACT_DIR, f));
     }
     // Always use project's hp.cfg.override in contract dir
     fs.copyFileSync(path.join(projectDir, 'hp.cfg.override'), path.join(CONTRACT_DIR, 'hp.cfg.override'));
@@ -423,163 +395,68 @@ const opDeploy = async () => {
     if (confirm!=='yes'&&confirm!=='y') { console.log('  Cancelled.'); return false; }
 
     console.log('');
-    console.log('[1/2] Installing contract dependencies...');
+    console.log('[1/3] Installing contract dependencies...');
     execSync(`npm install --prefix ${CONTRACT_DIR} --silent`);
     console.log('      ✓ Done.');
 
-    console.log('[2/2] Writing authorized_pubkey.txt...');
+    console.log('[2/3] Writing authorized_pubkey.txt...');
     fs.writeFileSync(path.join(CONTRACT_DIR,'authorized_pubkey.txt'), process.env.EV_USER_PUBLIC_KEY+'\n');
-    console.log(`      ✓ ${process.env.EV_USER_PUBLIC_KEY}\n`);
+    console.log(`      ✓ ${process.env.EV_USER_PUBLIC_KEY}`);
 
-    // ── Acquire each node individually ────────────────────────
-    console.log(`── Acquiring ${nodeCount} nodes ─────────────────────────────`);
-    console.log('  Note: Each acquire may take up to 2 minutes. Timed out nodes will be skipped.\n');
-    const acquiredNodes = [];
-    const failedNodes   = [];
-    let newContractId   = null;
+    const hostsFile='/tmp/ecm-deploy-hosts.txt';
+    fs.writeFileSync(hostsFile, hostAddrs.join('\n'));
 
-    for (let i = 0; i < hostAddrs.length; i++) {
-        const hostAddr = hostAddrs[i];
-        console.log(`  [${i+1}/${nodeCount}] Acquiring on ${hostAddr}...`);
-        try {
-            const contractFlag = newContractId ? `-c ${newContractId}` : '';
-            const acquireOut = execSync(
-                `bash -c 'set -a; source ${ENV_FILE}; set +a; unset EV_HP_OVERRIDE_CFG_PATH; export EV_HP_INIT_CFG_PATH=${INITCFG}; sudo -E evdevkit acquire ${hostAddr} -m ${moments} ${contractFlag}'`,
-                { encoding: 'utf8', timeout: 120000 }
-            );
-            console.log(acquireOut);
-
-            const pub  = (acquireOut.match(/pubkey['":\s]+['"]?(ed[a-f0-9]{64})['"]?/)||[])[1];
-            const peer = (acquireOut.match(/peer_port['":\s]+['"]?(\d+)['"]?/)||[])[1];
-            const user = (acquireOut.match(/user_port['":\s]+['"]?(\d+)['"]?/)||[])[1];
-            const dom  = (acquireOut.match(/domain['":\s]+['"]?([a-zA-Z0-9._-]+\.[a-zA-Z]{2,})['"]?/)||[])[1];
-            const name = (acquireOut.match(/name['":\s]+['"]?([A-F0-9]{64})['"]?/)||[])[1]||'';
-            const ts   = parseInt((acquireOut.match(/created_timestamp['":\s]+(\d+)/)||[])[1]||Date.now());
-            const cid  = (acquireOut.match(/contract_id['":\s]+['"]?([a-f0-9-]{36})['"]?/)||[])[1]||'';
-
-            if (!pub||!peer||!user||!dom) {
-                console.error(`  ✗ Could not parse acquire output for node ${i+1} — skipping.`);
-                failedNodes.push({ index: i+1, host: hostAddr, reason: 'parse error' });
-                continue;
-            }
-            if (!newContractId && cid) newContractId = cid;
-            acquiredNodes.push({ pubkey:pub, name, host:hostAddr, domain:dom, userPort:parseInt(user), peerPort:parseInt(peer), createdTimestamp:ts, lifeMoments:parseInt(moments) });
-            console.log(`  ✓ Node ${i+1} acquired: ${pub.slice(0,20)}… on ${dom}:${user}`);
-
-        } catch(e) {
-            const reason = e.code === 'ETIMEDOUT' ? 'timed out after 2 minutes' : e.message.slice(0,80);
-            console.error(`  ✗ Node ${i+1} failed (${reason}) — skipping.`);
-            failedNodes.push({ index: i+1, host: hostAddr, reason });
-        }
-    }
-
-    // ── Check if we have enough nodes ─────────────────────────
-    console.log(`\n  Acquired: ${acquiredNodes.length}/${nodeCount} nodes.`);
-    if (failedNodes.length > 0) {
-        console.log(`  Failed  : ${failedNodes.length} node(s):`);
-        failedNodes.forEach(f => console.log(`    Node ${f.index} on ${f.host} — ${f.reason}`));
-    }
-
-    if (acquiredNodes.length < 3) {
-        console.error(`\n  ✗ Need at least 3 nodes. Only ${acquiredNodes.length} acquired. Aborting.`);
-        console.log('  Tip: Try again with different hosts from the host finder (option 7).');
+    console.log('[3/3] Running evdevkit cluster-create...\n');
+    let clusterOutput = '';
+    try {
+        clusterOutput = execSync(
+            `bash -c 'set -a; source ${ENV_FILE}; set +a; unset EV_HP_OVERRIDE_CFG_PATH; export EV_HP_INIT_CFG_PATH=${INITCFG}; sudo -E evdevkit cluster-create ${nodeCount} -m ${moments} ${CONTRACT_DIR} /usr/bin/node ${hostsFile} -a index.js'`,
+            { encoding:'utf8' }
+        );
+        process.stdout.write(clusterOutput);
+    } catch(e) {
+        console.error('\n  ✗ cluster-create failed');
+        try{fs.unlinkSync(hostsFile);}catch{}
         return false;
     }
+    try{fs.unlinkSync(hostsFile);}catch{}
 
-    if (failedNodes.length > 0) {
-        console.log(`\n  Proceeding with ${acquiredNodes.length} nodes (minimum 3 met).`);
-        const retry = (await ask('  Retry failed nodes with different hosts? (yes/y or Enter to skip): ')).trim();
-        if (retry === 'yes' || retry === 'y') {
-            for (const failed of failedNodes) {
-                const newHost = (await ask(`  Replacement host for node ${failed.index} (was ${failed.host}): `)).trim();
-                if (!newHost) { console.log('  Skipped.'); continue; }
-                try {
-                    const contractFlag = newContractId ? `-c ${newContractId}` : '';
-                    const acquireOut = execSync(
-                        `bash -c 'set -a; source ${ENV_FILE}; set +a; unset EV_HP_OVERRIDE_CFG_PATH; export EV_HP_INIT_CFG_PATH=${INITCFG}; sudo -E evdevkit acquire ${newHost} -m ${moments} ${contractFlag}'`,
-                        { encoding: 'utf8', timeout: 120000 }
-                    );
-                    console.log(acquireOut);
-                    const pub  = (acquireOut.match(/pubkey['":\s]+['"]?(ed[a-f0-9]{64})['"]?/)||[])[1];
-                    const peer = (acquireOut.match(/peer_port['":\s]+['"]?(\d+)['"]?/)||[])[1];
-                    const user = (acquireOut.match(/user_port['":\s]+['"]?(\d+)['"]?/)||[])[1];
-                    const dom  = (acquireOut.match(/domain['":\s]+['"]?([a-zA-Z0-9._-]+\.[a-zA-Z]{2,})['"]?/)||[])[1];
-                    const name = (acquireOut.match(/name['":\s]+['"]?([A-F0-9]{64})['"]?/)||[])[1]||'';
-                    const ts   = parseInt((acquireOut.match(/created_timestamp['":\s]+(\d+)/)||[])[1]||Date.now());
-                    if (pub&&peer&&user&&dom) {
-                        acquiredNodes.push({ pubkey:pub, name, host:newHost, domain:dom, userPort:parseInt(user), peerPort:parseInt(peer), createdTimestamp:ts, lifeMoments:parseInt(moments) });
-                        console.log(`  ✓ Replacement node acquired: ${pub.slice(0,20)}… on ${dom}:${user}`);
-                    } else { console.error('  ✗ Could not parse output — skipped.'); }
-                } catch(e) { console.error(`  ✗ Retry failed: ${e.message.slice(0,80)}`); }
-            }
-        }
+    // Auto-parse cluster output
+    console.log('\n  Parsing cluster output...');
+    const nodes = parseEvmOutput(clusterOutput);
+    if (!Array.isArray(nodes) || nodes.length === 0) {
+        console.log('  ⚠ Could not auto-parse output. Please enter details manually.');
+        contractId = (await ask('  Contract ID: ')).trim();
+        ip         = (await ask('  Node IP/domain: ')).trim();
+        port       = (await ask('  Node user port: ')).trim();
+    } else {
+        // Extract from parsed nodes
+        contractId = nodes[0].contract_id;
+        ip         = nodes[0].domain;
+        port       = String(nodes[0].user_port);
+
+        // Save all nodes to cluster-nodes.json
+        const nodeRecords = nodes.map(n => ({
+            pubkey           : n.pubkey,
+            name             : n.name,
+            host             : n.host,
+            domain           : n.domain,
+            userPort         : parseInt(n.user_port),
+            peerPort         : parseInt(n.peer_port),
+            createdTimestamp : n.created_timestamp,
+            lifeMoments      : n.life_moments
+        }));
+        saveNodes(nodeRecords);
+
+        console.log(`  ✓ Contract ID : ${contractId}`);
+        console.log(`  ✓ Connecting  : ${ip}:${port}`);
+        console.log(`  ✓ Saved ${nodeRecords.length} node(s) to cluster-nodes.json`);
     }
 
-    if (!newContractId) { console.error('  ✗ Could not determine contract ID.'); return false; }
-    contractId = newContractId;
-    console.log(`\n  ✓ Proceeding with ${acquiredNodes.length} nodes. Contract ID: ${contractId}`);
-
-    // ── Build override config with all pubkeys ────────────────
-    console.log('\n── Building cluster bundle ──────────────────────────');
-    const allPubkeys = acquiredNodes.map(n => n.pubkey);
-    const allPeers   = acquiredNodes.map(n => `${n.domain}:${n.peerPort}`);
-    const overridePath = path.join(PROJECT_DIR, 'cluster-override-temp.cfg');
-    fs.writeFileSync(overridePath, JSON.stringify({
-        contract: {
-            bin_path: '/usr/bin/node', bin_args: 'index.js',
-            consensus: { roundtime: parseInt(process.env.HP_ROUNDTIME||5000), threshold: parseInt(process.env.HP_THRESHOLD||66) },
-            unl: allPubkeys
-        },
-        mesh: { peer_discovery: { enabled: process.env.HP_PEER_DISCOVERY==='true' }, known_peers: allPeers }
-    }, null, 2));
-    console.log(`  ✓ Override config: ${allPubkeys.length} nodes in UNL`);
-
-    try {
-        execSync(
-            `bash -c 'set -a; source ${ENV_FILE}; set +a; export EV_HP_OVERRIDE_CFG_PATH=${overridePath}; sudo -E evdevkit bundle ${CONTRACT_DIR} ${allPubkeys[0]} /usr/bin/node -a index.js'`,
-            { encoding: 'utf8', cwd: PROJECT_DIR }
-        );
-        console.log('  ✓ Bundle created.');
-    } catch(e) { console.error(`  ✗ Bundle failed: ${e.message}`); fs.unlinkSync(overridePath); return false; }
-    fs.unlinkSync(overridePath);
-
-    // ── Deploy to ALL nodes simultaneously ────────────────────
-    console.log('\n── Deploying to all nodes simultaneously ────────────');
-    console.log('  Waiting 30 seconds for bootstrap contracts to be ready...');
-    await sleep(30000);
-
-    console.log('  Deploying in parallel...\n');
-    const deployResults = await Promise.all(acquiredNodes.map(async (node, i) => {
-        try {
-            const out = execSync(
-                `bash -c 'set -a; source ${ENV_FILE}; set +a; sudo -E evdevkit deploy ${PROJECT_DIR}/bundle/bundle.zip ${node.domain} ${node.userPort}'`,
-                { encoding: 'utf8', timeout: 60000 }
-            );
-            const ok = out.includes('Contract bundle uploaded');
-            console.log(`  ${ok?'✓':'✗'} Node ${i+1} (${node.domain}:${node.userPort}) — ${ok?'deployed':'may have failed'}`);
-            return ok;
-        } catch(e) {
-            console.error(`  ✗ Node ${i+1} deploy failed: ${e.message.slice(0,80)}`);
-            return false;
-        }
-    }));
-
-    const deployedCount = deployResults.filter(Boolean).length;
-    console.log(`\n  Deployed: ${deployedCount}/${acquiredNodes.length} nodes`);
-
-    // ── Save results ──────────────────────────────────────────
-    saveNodes(acquiredNodes);
-    ip   = acquiredNodes[0].domain;
-    port = String(acquiredNodes[0].userPort);
-
-    console.log(`  ✓ Contract ID : ${contractId}`);
-    console.log(`  ✓ Connecting  : ${ip}:${port}`);
-    console.log(`  ✓ Saved ${acquiredNodes.length} node(s) to cluster-nodes.json`);
+    if (!contractId||!ip||!port) { console.log('  ✗ Missing cluster details.'); return false; }
 
     saveProjectMeta({ contractId, lastNode:`${ip}:${port}` });
-    console.log('\n  ✓ Cluster deployed and project updated.');
-    console.log('  Waiting 15 seconds for cluster to sync...\n');
-    await sleep(15000);
+    console.log('\n  ✓ Cluster deployed and project updated.\n');
     return true;
 };
 
@@ -818,7 +695,7 @@ const selectProject = async () => {
 
     console.log('  Select a project:\n');
     projects.forEach((p,i) => {
-        const status = p.contractId ? `contract: ${p.contractId.slice(0,8)}… | ${p.lastNode||'no node saved'}` : 'no cluster yet';
+        const status = p.contractId ? `contract: ${p.contractId.slice(0,8)}… | nodes tracked: ${p.nodeCount}` : 'no cluster yet';
         console.log(`    ${i+1}. ${p.name.padEnd(22)} ${status}`);
     });
     console.log(`    ${projects.length+1}. Create new project`);
@@ -889,9 +766,10 @@ const managementMenu = async () => {
 
 const main = async () => {
     console.log('');
-                   console.log('╔══════════════════════════════════════════════════════╗');
-                   console.log(`║       Evernode Cluster Manager  ${TOOL_VERSION}         ║`);
-                   console.log('╚══════════════════════════════════════════════════════╝');
+    console.log('╔══════════════════════════════════════════════════════╗');
+    console.log('║          Evernode Cluster Manager                   ║');
+    console.log('╚══════════════════════════════════════════════════════╝');
+
     fs.mkdirSync(PROJECTS_DIR, { recursive: true });
 
     // Install client dependencies if needed
