@@ -8,3 +8,5 @@ node-override-temp.cfg
 .DS_Store
 client/*.bak
 client/*.v2*
+client/*.bak
+client/*.v2*
