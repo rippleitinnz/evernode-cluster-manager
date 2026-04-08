@@ -17,7 +17,7 @@ A single tool for deploying and managing multiple HotPocket smart contract clust
 
 - Node.js v20+
 - evdevkit installed globally: `npm i evdevkit -g`
-- An XRPL wallet funded with EVR tokens (tenant account)
+- An XRPL-XAHAU wallet funded with EVR tokens (tenant account)
 
 ## Quick Start
 
@@ -58,7 +58,7 @@ On first run it shows a project selector. Each project is an independent cluster
 Select "Create new project" and the tool will ask for:
 - Project name
 - HotPocket user keys (or generate new ones)
-- XRPL tenant credentials
+- XRPL-XAHAU tenant credentials
 - HotPocket settings (round time, threshold, log level)
 - Default node count and life moments
 
