@@ -695,7 +695,7 @@ const selectProject = async () => {
 
     console.log('  Select a project:\n');
     projects.forEach((p,i) => {
-        const status = p.contractId ? `contract: ${p.contractId.slice(0,8)}… | nodes tracked: ${p.nodeCount}` : 'no cluster yet';
+        const status = p.contractId ? `contract: ${p.contractId.slice(0,8)}… | ${p.lastNode||'no node saved'}` : 'no cluster yet';
         console.log(`    ${i+1}. ${p.name.padEnd(22)} ${status}`);
     });
     console.log(`    ${projects.length+1}. Create new project`);
