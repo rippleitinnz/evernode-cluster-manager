@@ -83,12 +83,15 @@ Shows current cluster status on startup then presents a menu:
 Shows vote status, UNL nodes, peers and LCL.
 
 **Option 2 — Update contract**
+
 Enter a new version string (e.g. `v1.0.1`). Bundles and deploys live across all nodes. No restarts, consensus maintained.
 
 **Option 3 — Add a node**
+
 Enter an external host XRPL address. The manager acquires, bundles, deploys and adds the node to the running cluster automatically, then waits to confirm sync.
 
 **Option 4 — Remove a node**
+
 Select a node by index or pubkey. Will not remove if cluster would drop below 3 nodes.
 
 **Option 5 — Check node expiry**
