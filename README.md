@@ -73,7 +73,9 @@ Shows current cluster status on startup then presents a menu:
     2. Update contract
     3. Add a node
     4. Remove a node
-    5. Exit
+    5. Check node expiry
+    6. Extend node lease
+    7. Exit
 ```
 
 **Option 1 — Check status**
@@ -88,6 +90,14 @@ Enter an external host XRPL address. The manager acquires, bundles, deploys and 
 
 **Option 4 — Remove a node**
 Select a node by index or pubkey. Will not remove if cluster would drop below 3 nodes.
+
+**Option 5 — Check node expiry**
+
+Shows time remaining for each node in the cluster. Nodes added via the cluster manager are tracked in `cluster-nodes.json` with their creation timestamp and life moments.
+
+**Option 6 — Extend node lease**
+
+Select a node by index or enter "all" to extend all nodes. Specify how many additional moments (hours) to add. Updates the local node records automatically.
 
 ## Key Concepts
 
@@ -104,6 +114,7 @@ Select a node by index or pubkey. Will not remove if cluster would drop below 3 
 - Always delete old instances before deploying a new cluster to the same host — running clusters can corrupt the UNL of new nodes during the sync window
 - Never put `new Date()` or any non-deterministic value in contract outputs — all nodes must produce identical outputs for consensus
 - The `config/.env` file contains your private keys — never commit it to git (it is in `.gitignore` by default)
+- Node lease details are tracked in `config/cluster-nodes.json` — this file is auto-updated when nodes are added, removed or extended. It is reconciled against the live UNL on every startup.
 
 ## File Structure
 evernode-cluster-manager/
