@@ -325,6 +325,7 @@ CONTRACT_VERSION=${contractVersion}
 
     // Copy contract files
     for (const f of fs.readdirSync(contractSrcDir)) {
+        if (f === 'node_modules') continue;
         fs.copyFileSync(path.join(contractSrcDir, f), path.join(CONTRACT_DIR, f));
     }
     // Always use project's hp.cfg.override in contract dir
