@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Evernode Cluster Manager v2.3.0
+ * Evernode Cluster Manager v2.1.0
  *
  * Single tool for deploying and managing multiple HotPocket cluster projects.
  * No host access required.
@@ -10,7 +10,7 @@
 
 'use strict';
 
-const TOOL_VERSION = 'v2.3.0';
+const TOOL_VERSION = 'v2.1.0';
 
 const path         = require('path');
 const fs           = require('fs');
@@ -201,7 +201,7 @@ const getContractVersion = async (targetIp, targetPort) => {
         const done = (val) => {
             if (!resolved) { resolved = true; client.close().catch(() => {}); resolve(val); }
         };
-        const timer = setTimeout(() => done('unknown'), Math.max(20000, parseInt(process.env.HP_ROUNDTIME||5000) * 3));
+        const timer = setTimeout(() => done('unknown'), 10000);
         client.on(HP.events.contractOutput, (r) => {
             for (const o of r.outputs) {
                 try { const p = JSON.parse(o); if (p.version) { clearTimeout(timer); done(p.version); } } catch {}
@@ -229,175 +229,6 @@ const parseEvmOutput = (raw) => {
 
 // ── Host Finder ───────────────────────────────────────────────
 
-
-// ── Batch XAH + EVR balance check ─────────────────────────────
-const checkBalances = (addresses) => new Promise((resolve) => {
-    const WS = require('/usr/lib/node_modules/evdevkit/node_modules/ws');
-    const results = {};
-    addresses.forEach(a => { results[a] = { xah: 0, evr: 0 }; });
-    if (!addresses.length) { resolve(results); return; }
-    let ws;
-    try { ws = new WS('wss://xahau.network'); } catch { resolve(results); return; }
-    let pending = addresses.length * 2;
-    const finish = () => { try { ws.close(); } catch {} resolve(results); };
-    const timer = setTimeout(finish, 20000);
-    const dec = () => { if (--pending <= 0) { clearTimeout(timer); finish(); } };
-    ws.on('open', () => {
-        addresses.forEach(addr => {
-            ws.send(JSON.stringify({ command:'account_info',  account:addr, ledger_index:'current', id:'info_'+addr  }));
-            ws.send(JSON.stringify({ command:'account_lines', account:addr, ledger_index:'current', id:'lines_'+addr }));
-        });
-    });
-    ws.on('message', (data) => {
-        try {
-            const r = JSON.parse(data);
-            if (r.id && r.id.startsWith('info_')) {
-                const addr = r.id.replace('info_','');
-                if (r.result && r.result.account_data) results[addr].xah = parseInt(r.result.account_data.Balance)/1000000;
-                dec();
-            } else if (r.id && r.id.startsWith('lines_')) {
-                const addr = r.id.replace('lines_','');
-                const evr = r.result && r.result.lines && r.result.lines.find(l=>l.currency==='EVR');
-                if (evr) results[addr].evr = parseFloat(evr.balance);
-                dec();
-            }
-        } catch { dec(); }
-    });
-    ws.on('error', () => { clearTimeout(timer); resolve(results); });
-});
-
-// ── Batch reputation check via registry client ─────────────────
-const checkReputation = async (addresses) => {
-    const results = {};
-    addresses.forEach(a => { results[a] = null; });
-    if (!addresses.length) return results;
-    try {
-        const evernode = require('/usr/lib/node_modules/evdevkit/node_modules/evernode-js-client');
-        await evernode.Defaults.useNetwork('mainnet');
-        const xrplApi = new evernode.XrplApi();
-        evernode.Defaults.set({ xrplApi, useCentralizedRegistry: true });
-        await xrplApi.connect();
-        const reg = await evernode.HookClientFactory.create(evernode.HookTypes.registry);
-        await reg.connect();
-        await Promise.all(addresses.map(async addr => {
-            try {
-                const info = await reg.getHostInfo(addr);
-                results[addr] = (info && info.hostReputation !== undefined) ? info.hostReputation : null;
-            } catch { results[addr] = null; }
-        }));
-        await reg.disconnect();
-        await xrplApi.disconnect();
-    } catch(e) { console.error('  Warning: Reputation check failed:', e.message); }
-    return results;
-};
-
-// ── Host Finder ───────────────────────────────────────────────
-const findHosts = async (minSlots = 1, targetCount = 20) => {
-    const batchSize = 15;
-    const MAX_SCAN  = 300;
-    const MIN_XAH   = 5;
-    const MIN_EVR   = 1;
-    const MIN_REP   = 200;
-
-    console.log('\n  Scanning for ' + targetCount + ' active hosts with >= ' + minSlots + ' slot(s)...');
-    console.log('  Filters: slots >= ' + minSlots + ' | XAH >= ' + MIN_XAH + ' | EVR >= ' + MIN_EVR + ' | reputation >= ' + MIN_REP + '/255');
-    console.log('  Note: The Evernode network has 15,000+ registered hosts, most inactive.');
-    console.log('  Hosts are checked in batches — this typically takes 2-3 minutes.');
-    console.log('  Press Ctrl+C to stop early and show results so far.\n');
-
-    const get = (url) => new Promise((resolve, reject) => {
-        https.get(url, res => { let d=''; res.on('data',c=>d+=c); res.on('end',()=>{ try{resolve(JSON.parse(d));}catch(e){reject(e);} }); }).on('error', reject);
-    });
-
-    process.stdout.write('  Fetching host list...');
-    const data = await get('https://xahau.xrplwin.com/api/evernode/hosts');
-    const priceMap = {};
-    const allHosts = data.data.filter(h=>h.leaseprice_evr_drops!==null&&h.host).map(h=>{ priceMap[h.host]=h.leaseprice_evr_drops; return h.host; });
-    console.log(' ' + allHosts.length + ' registered hosts.');
-
-    const shuffled = allHosts.sort(()=>Math.random()-0.5);
-    const found=[]; const checked=new Set(); let idx=0,batchNum=0,cancelled=false;
-
-    const sigHandler = () => { cancelled=true; console.log('\n\n  Scan stopped — showing results so far...'); };
-    process.once('SIGINT', sigHandler);
-
-    while (found.length<targetCount&&idx<shuffled.length&&checked.size<MAX_SCAN&&!cancelled) {
-        const batch=[];
-        while (batch.length<batchSize&&idx<shuffled.length) {
-            if(!checked.has(shuffled[idx])){batch.push(shuffled[idx]);checked.add(shuffled[idx]);}
-            idx++;
-        }
-        if (!batch.length) break;
-        batchNum++;
-        process.stdout.write('  Batch ' + String(batchNum).padStart(2) + ' | Checked: ' + checked.size + '/' + MAX_SCAN + ' | Found: ' + found.length + '/' + targetCount + '\r');
-
-        const tmpFile='/tmp/ecm-hosts-batch.txt';
-        fs.writeFileSync(tmpFile, batch.join('\n'));
-        const result=spawnSync('evdevkit',['hostinfo','-f',tmpFile],{encoding:'utf8',timeout:60000});
-        try{fs.unlinkSync(tmpFile);}catch{}
-        const info=parseEvmOutput(result.stdout||'');
-        if (!Array.isArray(info)) continue;
-
-        const candidates = info.filter(h=>h.active&&h.availableInstanceSlots>=minSlots);
-        if (!candidates.length) continue;
-
-        const addrs = candidates.map(h=>h.address);
-        process.stdout.write('  Batch ' + String(batchNum).padStart(2) + ' | Checking ' + addrs.length + ' candidates (balance + reputation)...\r');
-
-        const [balances, reputations] = await Promise.all([
-            checkBalances(addrs),
-            checkReputation(addrs)
-        ]);
-
-        for (const h of candidates) {
-            const bal = balances[h.address] || { xah:0, evr:0 };
-            const rep = reputations[h.address];
-            if (bal.xah < MIN_XAH) continue;
-            if (bal.evr < MIN_EVR) continue;
-            if (rep !== null && rep < MIN_REP) continue;
-            h.leasePrice = priceMap[h.address]||null;
-            h.xahBalance = bal.xah;
-            h.evrBalance = bal.evr;
-            h.reputation = rep;
-            found.push(h);
-        }
-    }
-
-    process.removeListener('SIGINT', sigHandler);
-
-    if (checked.size>=MAX_SCAN&&found.length<targetCount)
-        console.log('\n  Reached scan limit of ' + MAX_SCAN + ' hosts. Showing ' + found.length + ' results.');
-    else
-        console.log('\n  Found ' + found.length + ' verified host(s).');
-    console.log('');
-
-    if (!found.length) { console.log('  No hosts passed all filters.'); return found; }
-
-    found.sort((a,b)=>(b.reputation||0)-(a.reputation||0)||(b.availableInstanceSlots-a.availableInstanceSlots)||(a.leasePrice||0)-(b.leasePrice||0));
-
-    const fmtEVR=(d)=>{ if(!d)return'free?'; const e=d/1000000; if(e<0.001)return d+'drops'; if(e<1)return e.toFixed(4)+' EVR'; return e.toFixed(2)+' EVR'; };
-    const fmtRep=(r)=>r===null?'?':String(r);
-
-    console.log('  '+hr(131));
-    console.log('  '+'#'.padEnd(4)+'Address'.padEnd(36)+'Domain'.padEnd(25)+'CC'.padEnd(5)+'Avail'.padEnd(7)+'Total'.padEnd(7)+'Rep'.padEnd(6)+'XAH'.padEnd(8)+'EVR'.padEnd(8)+'Lease/hr'.padEnd(12)+'Version');
-    console.log('  '+hr(131));
-    found.forEach((h,i)=>console.log(
-        '  '+String(i+1).padEnd(4)+
-        (h.address||'').padEnd(36)+
-        (h.domain||'').slice(0,23).padEnd(25)+
-        (h.countryCode||'??').padEnd(5)+
-        String(h.availableInstanceSlots||0).padEnd(7)+
-        String(h.totalInstanceSlots||0).padEnd(7)+
-        fmtRep(h.reputation).padEnd(6)+
-        (h.xahBalance||0).toFixed(1).padEnd(8)+
-        (h.evrBalance||0).toFixed(1).padEnd(8)+
-        fmtEVR(h.leasePrice).padEnd(12)+
-        (h.sashimonoVersion||'?')
-    ));
-    console.log('  '+hr(131));
-    console.log('\n  ' + found.length + ' host(s) verified — active, funded and reputation >= ' + MIN_REP + '.\n  Tip: Choose hosts with Total=1 to ensure evdevkit deploys one node per host.\n');
-    return found;
-};
 
 // ── Global credentials setup ──────────────────────────────────
 
@@ -883,36 +714,6 @@ const opFindHosts = async () => {
     await findHosts(minSlots,target);
 };
 
-
-// ── Delete Project ────────────────────────────────────────────
-
-const opDeleteProject = async (project) => {
-    console.log('\n── Delete Project ───────────────────────────────────');
-    console.log(`  Project : ${project.name}`);
-    if (project.contractId) console.log(`  Contract: ${project.contractId.slice(0,8)}…`);
-    console.log('');
-    const confirm = (await ask('  Are you sure you want to delete this project? (yes/y): ')).trim();
-    if (confirm !== 'yes' && confirm !== 'y') { console.log('  Cancelled.'); return; }
-    const delDir = (await ask('  Also delete project directory and all files? (yes/y or Enter to keep): ')).trim();
-    if (delDir === 'yes' || delDir === 'y') {
-        fs.rmSync(project.dir, { recursive: true, force: true });
-        console.log(`  ✓ Project "${project.name}" and all files deleted.`);
-    } else {
-        console.log(`  ✓ Project "${project.name}" removed from list (files kept at ${project.dir}).`);
-    }
-};
-
-// ── Reset Global Credentials ──────────────────────────────────
-
-const opResetCredentials = async () => {
-    console.log('\n── Reset Global Credentials ─────────────────────────');
-    console.log('  This will overwrite the shared credentials used by all projects.');
-    const confirm = (await ask('  Proceed? (yes/y): ')).trim();
-    if (confirm !== 'yes' && confirm !== 'y') { console.log('  Cancelled.'); return; }
-    await setupGlobalCredentials();
-    console.log('  ✓ Global credentials updated.');
-};
-
 // ── Project selector ──────────────────────────────────────────
 
 const selectProject = async () => {
@@ -924,46 +725,21 @@ const selectProject = async () => {
     }
 
     console.log('  Select a project:\n');
-    console.log('    1. Create new project');
-    console.log('    2. Reset global credentials');
-    console.log('    3. Remove projects');
     projects.forEach((p,i) => {
         const status = p.contractId ? `contract: ${p.contractId.slice(0,8)}… | ${p.lastNode||'no node saved'}` : 'no cluster yet';
-        console.log(`    ${i+4}. ${p.name.padEnd(22)} ${status}`);
+        console.log(`    ${i+1}. ${p.name.padEnd(22)} ${status}`);
     });
-    console.log(`    ${projects.length+4}. Exit`);
+    console.log(`    ${projects.length+1}. Create new project`);
+    console.log(`    ${projects.length+2}. Exit`);
     console.log('');
 
     while (true) {
         const input=(await ask('  Choice: ')).trim();
         const idx=parseInt(input);
-        if (idx===projects.length+4) { rl.close(); process.exit(0); }
-        if (idx===1) { return await createProject(); }
-        if (idx===2) { await opResetCredentials(); return await selectProject(); }
-        if (idx===3) {
-            // Remove projects
-            console.log('\n  Select projects to remove (comma-separated numbers, e.g. 1,3,5):');
-            projects.forEach((p,i) => console.log(`    ${i+1}. ${p.name}`));
-            console.log('');
-            const sel = (await ask('  Projects to remove (or Enter to cancel): ')).trim();
-            if (sel) {
-                const indices = sel.split(',').map(s=>parseInt(s.trim())-1).filter(i=>i>=0&&i<projects.length);
-                for (const i of indices) {
-                    await opDeleteProject(projects[i]);
-                }
-            }
-            return await selectProject();
-        }
-        if (idx>=4&&idx<=projects.length+3) {
-            const project=projects[idx-4];
-            console.log(`\n  Project: ${project.name}`);
-            console.log('    1. Open project');
-            console.log('    2. Delete project');
-            console.log('    3. Back');
-            console.log('');
-            const action=(await ask('  Choice: ')).trim();
-            if (action==='2') { await opDeleteProject(project); return await selectProject(); }
-            if (action==='3') { return await selectProject(); }
+        if (idx===projects.length+2) { rl.close(); process.exit(0); }
+        if (idx===projects.length+1) { return await createProject(); }
+        if (idx>=1&&idx<=projects.length) {
+            const project=projects[idx-1];
             setProject(project.dir);
             loadProjectEnv();
             if (project.lastNode) { const parts=project.lastNode.split(':'); ip=parts[0]; port=parts[1]; }
@@ -1021,13 +797,9 @@ const managementMenu = async () => {
 
 const main = async () => {
     console.log('');
-    const title = `  Evernode Cluster Manager  ${TOOL_VERSION}  `;
-    const width = 54;
-    const pad = width - title.length;
-    const padStr = ' '.repeat(Math.max(0, pad));
-    console.log('╔' + '═'.repeat(width) + '╗');
-    console.log('║' + title + padStr + '║');
-    console.log('╚' + '═'.repeat(width) + '╝');
+    console.log('╔══════════════════════════════════════════════════════╗');
+    console.log(`║     Evernode Cluster Manager  ${TOOL_VERSION}            ║`);
+    console.log('╚══════════════════════════════════════════════════════╝');
 
     fs.mkdirSync(PROJECTS_DIR, { recursive: true });
 
