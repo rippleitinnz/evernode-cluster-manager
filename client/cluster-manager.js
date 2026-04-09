@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Evernode Cluster Manager v2.3.0
+ * Evernode Cluster Manager v2.5.0
  *
  * Single tool for deploying and managing multiple HotPocket cluster projects.
  * No host access required.
@@ -10,7 +10,7 @@
 
 'use strict';
 
-const TOOL_VERSION = 'v2.3.0';
+const TOOL_VERSION = 'v2.5.0';
 
 const path         = require('path');
 const fs           = require('fs');
@@ -229,6 +229,70 @@ const parseEvmOutput = (raw) => {
 
 // ── Host Finder ───────────────────────────────────────────────
 
+// ── Fast host finder via local API ───────────────────────────
+const findHostsViaAPI = async (apiUrl, minSlots, targetCount, minRep, includeUnscored) => {
+    const url = apiUrl.replace(/\/$/, '') +
+        '/hosts?active=true' +
+        '&minSlots=' + minSlots +
+        '&minRep=' + (minRep || 200) +
+        (includeUnscored ? '&includeUnscored=true' : '') +
+        '&minXah=5&minEvr=1' +
+        '&sortBy=hostReputation&sortDir=desc' +
+        '&limit=' + targetCount;
+
+    return new Promise((resolve, reject) => {
+        const mod = url.startsWith('https') ? require('https') : require('http');
+        mod.get(url, (res) => {
+            let d = '';
+            res.on('data', c => d += c);
+            res.on('end', () => {
+                try {
+                    const data = JSON.parse(d);
+                    if (!data.success) { reject(new Error(data.error || 'API error')); return; }
+
+                    // Fetch balances for returned hosts
+                    const hosts = data.hosts;
+                    // Fetch cache age
+                    const ageMs = hosts.length > 0 ? Date.now() - hosts[0].lastUpdated : 0;
+                    const ageMin = Math.round(ageMs / 60000);
+                    const ageTxt = ageMin < 1 ? 'just now' : ageMin + ' min ago';
+                    console.log('\n  API returned ' + hosts.length + ' hosts (from ' + data.total + ' matching) | cache updated: ' + ageTxt);
+
+                    // Display results
+                    const fmtEVR = (drops) => {
+                        if (!drops) return 'free?';
+                        const e = drops / 1000000;
+                        if (e < 0.001) return drops + 'drops';
+                        if (e < 1) return e.toFixed(4) + ' EVR';
+                        return e.toFixed(2) + ' EVR';
+                    };
+                    const fmtRep = (r) => r === null || r === undefined ? '?' : String(r);
+
+                    console.log('  ' + hr(131));
+                    console.log('  ' + '#'.padEnd(4) + 'Address'.padEnd(36) + 'Domain'.padEnd(25) + 'CC'.padEnd(5) + 'Avail'.padEnd(7) + 'Total'.padEnd(7) + 'Rep'.padEnd(6) + 'RAM'.padEnd(8) + 'Lease/hr'.padEnd(12) + 'Version');
+                    console.log('  ' + hr(131));
+                    hosts.forEach((h, i) => console.log(
+                        '  ' + String(i + 1).padEnd(4) +
+                        (h.address || '').padEnd(36) +
+                        (h.domain || '').slice(0, 23).padEnd(25) +
+                        (h.countryCode || '??').padEnd(5) +
+                        String(h.availableInstances || 0).padEnd(7) +
+                        String(h.maxInstances || 0).padEnd(7) +
+                        fmtRep(h.hostReputation).padEnd(6) +
+                        (h.ramMb ? Math.round(h.ramMb / 1024) + 'GB' : '?').padEnd(8) +
+                        fmtEVR(h.leaseDrops).padEnd(12) +
+                        (h.version || '?')
+                    ));
+                    console.log('  ' + hr(131));
+                    console.log('\n  ' + hosts.length + ' host(s) from local API cache.\n');
+
+                    resolve(hosts);
+                } catch(e) { reject(e); }
+            });
+        }).on('error', reject);
+    });
+};
+
 
 // ── Batch XAH + EVR balance check ─────────────────────────────
 const checkBalances = (addresses) => new Promise((resolve) => {
@@ -292,7 +356,18 @@ const checkReputation = async (addresses) => {
 };
 
 // ── Host Finder ───────────────────────────────────────────────
-const findHosts = async (minSlots = 1, targetCount = 20) => {
+const findHosts = async (minSlots = 1, targetCount = 20, minRep = 200, includeUnscored = false) => {
+    // Use local API if configured
+    const apiUrl = process.env.HOST_API_URL;
+    if (apiUrl) {
+        try {
+            console.log('\n  Using local host API: ' + apiUrl);
+            return await findHostsViaAPI(apiUrl, minSlots, targetCount, minRep, includeUnscored);
+        } catch(e) {
+            console.log('  ⚠ API unavailable (' + e.message + ') — falling back to network scan...');
+        }
+    }
+
     const batchSize = 15;
     const MAX_SCAN  = 300;
     const MIN_XAH   = 5;
@@ -546,6 +621,50 @@ CONTRACT_VERSION=${contractVersion}
     return projectName;
 };
 
+
+// ── Verify host availability (live check) ─────────────────────
+const verifyHosts = async (hostAddrs, requiredSlots = 1) => {
+    const xahauWs = process.env.XAHAU_WS || 'wss://xahau.network';
+    console.log('\n  Verifying host availability via ' + xahauWs + '...');
+    try {
+        const evernode = require('/usr/lib/node_modules/evdevkit/node_modules/evernode-js-client');
+        await evernode.Defaults.useNetwork('mainnet');
+        const xrplApi = new evernode.XrplApi(xahauWs);
+        evernode.Defaults.set({ xrplApi, useCentralizedRegistry: true });
+        await xrplApi.connect();
+        const reg = await evernode.HookClientFactory.create(evernode.HookTypes.registry);
+        await reg.connect();
+
+        const results = await Promise.all(hostAddrs.map(async (addr) => {
+            try {
+                const info = await reg.getHostInfo(addr);
+                const available = info ? (info.maxInstances - info.activeInstances) : 0;
+                const ok = info?.active && available >= requiredSlots;
+                return { addr, ok, available, active: info?.active || false };
+            } catch {
+                return { addr, ok: false, available: 0, active: false };
+            }
+        }));
+
+        await reg.disconnect();
+        await xrplApi.disconnect();
+
+        let allOk = true;
+        for (const r of results) {
+            if (r.ok) {
+                console.log('  ✓ ' + r.addr + ' — ' + r.available + ' slot(s) available');
+            } else {
+                console.log('  ✗ ' + r.addr + ' — ' + (r.active ? r.available + ' slots available (insufficient)' : 'inactive or not found'));
+                allOk = false;
+            }
+        }
+        return { allOk, results };
+    } catch(e) {
+        console.error('  ⚠ Could not verify hosts: ' + e.message);
+        return { allOk: null, results: [] }; // null = verification failed, proceed with caution
+    }
+};
+
 // ── Deploy ────────────────────────────────────────────────────
 
 const opDeploy = async () => {
@@ -587,6 +706,32 @@ const opDeploy = async () => {
     console.log('');
     const confirm=(await ask('  Proceed? (yes/y): ')).trim();
     if (confirm!=='yes'&&confirm!=='y') { console.log('  Cancelled.'); return false; }
+
+    // Verify hosts are still available before committing
+    const { allOk, results } = await verifyHosts(hostAddrs, 1);
+    if (allOk === false) {
+        const unavailable = results.filter(r => !r.ok).map(r => r.addr);
+        console.log('\n  ✗ ' + unavailable.length + ' host(s) no longer available:');
+        unavailable.forEach(a => console.log('    ' + a));
+        console.log('');
+        for (const bad of unavailable) {
+            const idx = hostAddrs.indexOf(bad);
+            console.log('  Host ' + (idx+1) + ' (' + bad + ') is unavailable.');
+            const replace = (await ask('  Enter replacement host address (or Enter to cancel): ')).trim();
+            if (!replace) { console.log('  Cancelled.'); return false; }
+            hostAddrs[idx] = replace;
+        }
+        // Re-verify after replacements
+        console.log('');
+        const recheck = await verifyHosts(hostAddrs, 1);
+        if (recheck.allOk === false) {
+            const proceed = (await ask('  Some replacement hosts are still unavailable. Proceed anyway? (yes/y or Enter to cancel): ')).trim();
+            if (proceed !== 'yes' && proceed !== 'y') { console.log('  Cancelled.'); return false; }
+        }
+    } else if (allOk === null) {
+        const proceed = (await ask('  Could not verify hosts. Proceed anyway? (yes/y or Enter to cancel): ')).trim();
+        if (proceed !== 'yes' && proceed !== 'y') { console.log('  Cancelled.'); return false; }
+    }
 
     console.log('');
     console.log('[1/3] Installing contract dependencies...');
@@ -736,6 +881,16 @@ const opAddNode = async () => {
     const moments=(await ask(`  Life moments (default ${process.env.DEFAULT_MOMENTS||3}): `)).trim()||(process.env.DEFAULT_MOMENTS||'3');
     if (!extHost) { console.log('  Cancelled.'); return; }
 
+    // Verify host is available before acquiring
+    const { allOk: hostOk } = await verifyHosts([extHost], 1);
+    if (hostOk === false) {
+        const proceed = (await ask('  Host has no available slots. Proceed anyway? (yes/y or Enter to cancel): ')).trim();
+        if (proceed !== 'yes' && proceed !== 'y') { console.log('  Cancelled.'); return; }
+    } else if (hostOk === null) {
+        const proceed = (await ask('  Could not verify host. Proceed anyway? (yes/y or Enter to cancel): ')).trim();
+        if (proceed !== 'yes' && proceed !== 'y') { console.log('  Cancelled.'); return; }
+    }
+
     let acquireOutput;
     try {
         acquireOutput=execSync(
@@ -880,7 +1035,9 @@ const opExtendLease = async () => {
 const opFindHosts = async () => {
     const minSlots=parseInt((await ask('  Minimum available slots (default 1): ')).trim()||'1');
     const target=parseInt((await ask('  Number of hosts to find (default 20): ')).trim()||'20');
-    await findHosts(minSlots,target);
+    const minRep=parseInt((await ask('  Minimum reputation score (default 200, max 252): ')).trim()||'200');
+    const unscored=(await ask('  Include unscored hosts rep=0? (yes/y or Enter to skip): ')).trim();
+    await findHosts(minSlots, target, minRep, unscored==='yes'||unscored==='y');
 };
 
 
