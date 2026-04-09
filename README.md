@@ -257,6 +257,38 @@ The default contract template at `contract/index.js` in this repository is a ful
 - Never put `new Date()` or any non-deterministic value in contract outputs — all nodes must produce identical outputs for consensus
 - The `.env` file in each project contains private keys — never commit it to git
 
+## Known Issue: evdevkit Host Selection Bug
+
+There is a known bug in `evdevkit cluster-create` (tracked in [EvernodeXRPL/evernode-sdk#96](https://github.com/EvernodeXRPL/evernode-sdk/issues/96)) where the third host in your hosts file is systematically ignored, with the first host receiving two nodes instead.
+
+### Root cause
+
+`evdevkit cluster-create` uses a chunk-based allocation algorithm that always skips the third specified host when deploying a 3-node cluster. This is independent of host price, balance or availability.
+
+### Workaround — Use hosts with only 1 available instance slot
+
+The bug only affects hosts that have more than 1 available slot. When a host has exactly 1 slot available, `evdevkit` cannot place a second node on it and is forced to move to the next host.
+
+**How to guarantee one node per host:**
+
+1. Use **Option 7 — Find available hosts** and look at the **Total** column
+2. Choose hosts where `Total = 1` (only one instance slot configured on that host)
+3. Or fill up a host's spare slots first by deploying placeholder contracts, leaving exactly 1 slot free
+
+The find-hosts results table shows both `Avail` (available slots) and `Total` (total slots configured). A host showing `Avail: 1 | Total: 1` is ideal — it has exactly one slot and evdevkit will be forced to use each host exactly once.
+
+**Example — filling spare slots on your own host:**
+
+If your host has 6 total slots and you want to use it with only 1 slot available, deploy 5 placeholder instances first using `evdevkit acquire` with any contract ID, then use that host in your cluster deployment.
+
+### Alternative workaround — Add nodes after initial deploy
+
+1. Deploy the initial 3-node cluster on a single host (guaranteed to work)
+2. Use **Option 3 — Add a node** to add nodes to your preferred external hosts
+3. Use **Option 4 — Remove a node** to remove the original single-host nodes
+
+This gives full control over which hosts your cluster uses, at the cost of a few extra steps.
+
 ## File Structure
 
 ```
