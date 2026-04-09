@@ -10,3 +10,12 @@ client/*.bak
 client/*.v2*
 client/*.bak
 client/*.v2*
+client/*.save
+client/*.save.*
+patch_cm.py
+config/cluster-nodes.json
+config/hp-init.cfg
+contract/authorized_pubkey.txt
+contract/hp.cfg.override
+contract/install.sh
+contract/package-lock.json
