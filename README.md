@@ -41,7 +41,7 @@ On first run it shows a project selector. Each project is an independent cluster
 
 ```
 ╔══════════════════════════════════════════════════════╗
-║          Evernode Cluster Manager                   ║
+║          Evernode Cluster Manager                    ║
 ╚══════════════════════════════════════════════════════╝
 
   Select a project:
