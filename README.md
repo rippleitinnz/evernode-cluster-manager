@@ -148,3 +148,75 @@ Without HOST_API_URL set, the tool falls back to scanning the Evernode network d
 - Minimum viable cluster size is 3 nodes
 - Backups of contract state are created automatically before each upgrade (last 5 kept)
 - If an upgrade fails, post_exec.sh automatically rolls back patch.cfg
+
+## Using Your Own Contract
+
+You can deploy and manage your own contract using the cluster manager. The only requirement is that your contract includes the 8 built-in management handlers alongside your own business logic — without them you lose the ability to manage the cluster remotely.
+
+### Step 1 — Start from the template
+
+Copy the existing contract source as your starting point:
+
+```bash
+cp contract/src/index.js contract/src/my-contract.js
+```
+
+Or use `contract/src/index.js` directly and add your logic to it.
+
+### Step 2 — Add your business logic
+
+Open `contract/src/index.js` and add your own handlers inside the existing switch statement. The management handlers must remain intact:
+
+```javascript
+// Your business logic handlers
+const handleMyAction = async (user, msg, ctx) => {
+    // your code here
+    await send(user, { type: 'myAction', status: 'ok' });
+};
+
+// In the contract switch statement, add alongside existing handlers:
+case 'myAction': await handleMyAction(user, msg, ctx); break;
+```
+
+### Step 3 — Install your dependencies
+
+Add any packages your contract needs to `contract/package.json` dependencies, then:
+
+```bash
+npm install --prefix contract
+```
+
+### Step 4 — Build
+
+```bash
+cd contract && npm run build
+```
+
+This compiles your contract and all dependencies into a single `dist/index.js`.
+
+### Step 5 — Deploy
+
+Create a new project in the cluster manager and when asked for the contract source select option 2 (Use my own contract directory) and point it to `contract/dist/`.
+
+From there the cluster manager handles everything — deploy, upgrade, add/remove nodes — exactly as with the default contract.
+
+### Critical rules
+
+- **Keep all 8 management handlers** — removing any of them will break cluster management
+- **No non-deterministic values in outputs** — never use `new Date()`, `Math.random()` or any value that differs between nodes in contract outputs. All nodes must produce identical output for consensus
+- **Version constant required** — keep `const VERSION = 'x.x.x'` and bump it on every upgrade so the cluster manager can confirm the upgrade succeeded
+- **Readonly handlers** — any handler you want to call without going through consensus must be placed in the `ctx.readonly` block
+
+### Future — Module approach
+
+A future version of the cluster manager will provide an npm package that you can simply `require` in your contract:
+
+```javascript
+const ClusterManager = require('evernode-cluster-manager');
+// Registers all 8 management handlers automatically
+ClusterManager.init(ctx);
+
+// Your business logic here
+```
+
+This is planned but not yet implemented.
