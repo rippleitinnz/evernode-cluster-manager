@@ -1025,9 +1025,9 @@ const opCheckExpiry = async () => {
     }
     console.log(`  Current time: ${new Date().toUTCString()}\n`);
     console.log('  '+hr(90));
-    console.log('  '+'Pubkey'.padEnd(22)+'Domain'.padEnd(25)+'Moments'.padEnd(9)+'Remaining'.padEnd(12)+'Expires (UTC)');
+    console.log('  '+'Pubkey'.padEnd(22)+'Domain'.padEnd(25)+'Purchased'.padEnd(11)+'Remaining'.padEnd(12)+'Expires (UTC)');
     console.log('  '+hr(90));
-    nodes.forEach(n=>{ const tr=timeRemaining(n); console.log('  '+(n.pubkey.slice(0,20)+'…').padEnd(22)+(n.domain||'').slice(0,23).padEnd(25)+String(n.lifeMoments).padEnd(9)+(tr.expired?'⚠ EXPIRED':tr.text).padEnd(12)+new Date(tr.expirySec*1000).toUTCString()); });
+    nodes.forEach(n=>{ const tr=timeRemaining(n); console.log('  '+(n.pubkey.slice(0,20)+'…').padEnd(22)+(n.domain||'').slice(0,23).padEnd(25)+(n.lifeMoments+'h total').padEnd(11)+(tr.expired?'⚠ EXPIRED':tr.text).padEnd(12)+new Date(tr.expirySec*1000).toUTCString()); });
     console.log('  '+hr(90));
     console.log('─────────────────────────────────────────────────────\n');
 };

@@ -60,3 +60,8 @@
 - **README.md** — completely rewritten for v3.0.0. Updated all menu options, addNode flow (EV_HP_INIT_CFG_PATH approach), removed outdated bundle/deploy references, added Option 8 Read node log, updated contract handler table, added host discovery API section pointing to public api.onledger.net, added Xahau public node default.
 - **layout.md** — new file documenting the full contract upgrade process in detail including ncc build, evdevkit bundle, post_exec.sh flow and consensus integrity.
 - **Bring your own contract** — new README section explaining how to add custom business logic alongside the management handlers, critical rules (no non-deterministic outputs, keep all 8 handlers, version constant required), and future module approach.
+
+### UX fixes (v3.0.0 continued)
+
+- **Node expiry display** — renamed `Moments` column to `Purchased` showing `Xh total` to clarify it is the total lease duration, not time remaining
+- **Expiry alert monitor** — added background check every 30 minutes, alerts when nodes with >= 12 purchased moments have less than 6 hours remaining. Configurable via `ALERT_HOURS` and `ALERT_MIN_MOMENTS` in project `.env`
