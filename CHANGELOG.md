@@ -54,3 +54,9 @@
 - **`findHostsViaAPI`** — removed stale `// Fetch balances` comment
 - **Host deduplication** — improved operator detection to handle numbered subdomains (e.g. `n1234.bisdaknode1051-1100.ovh` correctly groups as `bisdaknode` operator). Now works correctly in both `opDeploy` and `opFindHosts`.
 - **Future ideas logged** — auto-extend leases when nodes within 24h of expiry; local web server UI; bring-your-own-contract module; pre-flight host check before acquiring
+
+### Documentation (v3.0.0 continued)
+
+- **README.md** — completely rewritten for v3.0.0. Updated all menu options, addNode flow (EV_HP_INIT_CFG_PATH approach), removed outdated bundle/deploy references, added Option 8 Read node log, updated contract handler table, added host discovery API section pointing to public api.onledger.net, added Xahau public node default.
+- **layout.md** — new file documenting the full contract upgrade process in detail including ncc build, evdevkit bundle, post_exec.sh flow and consensus integrity.
+- **Bring your own contract** — new README section explaining how to add custom business logic alongside the management handlers, critical rules (no non-deterministic outputs, keep all 8 handlers, version constant required), and future module approach.
