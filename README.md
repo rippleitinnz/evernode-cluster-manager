@@ -126,6 +126,10 @@ evernode-cluster-manager/
 
 **Node tracking:** All nodes saved to cluster-nodes.json with pubkey, domain, ports, creation timestamp and life moments. Stale entries reconciled automatically against the live UNL.
 
+**Life moments:** Each moment is 1 hour. The `Purchased` column in the expiry view shows total lease duration bought — `Remaining` shows how much is left.
+
+**Expiry alerts:** A background monitor runs every 30 minutes and warns when nodes are close to expiry. Only triggers for nodes with 12 or more purchased moments. Configure via `ALERT_HOURS` (default 6) and `ALERT_MIN_MOMENTS` (default 12) in your project `.env`.
+
 ## Host Discovery API
 
 The cluster manager can use a host discovery API for fast cached host lookups instead of scanning the network directly. A public API is available at api.onledger.net.
