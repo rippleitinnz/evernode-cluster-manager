@@ -128,12 +128,17 @@ evernode-cluster-manager/
 
 ## Host Discovery API
 
-Set HOST_API_URL in your project .env to use a local cached API instead of scanning the network:
+The cluster manager can use a host discovery API for fast cached host lookups instead of scanning the network directly. A public API is available at api.onledger.net.
 
-HOST_API_URL=http://192.168.1.50:3001
-XAHAU_WS=ws://192.168.1.50:6008
+Set the following in your project .env:
 
-See api.onledger.net for a public reference implementation.
+HOST_API_URL=https://api.onledger.net
+
+Optionally, specify a Xahau node (defaults to public node if not set):
+
+XAHAU_WS=wss://xahau.network
+
+Without HOST_API_URL set, the tool falls back to scanning the Evernode network directly which takes 2-3 minutes.
 
 ## Important Notes
 
