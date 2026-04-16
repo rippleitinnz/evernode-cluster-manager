@@ -90,7 +90,7 @@ Select any node and choose which log to read: hp.log (HotPocket consensus/networ
 | removePeer | consensus | Removes a stale peer connection |
 
 ## Project Storage
-
+```
 ~/.evernode-clusters/
 ├── .env                        <- global credentials (shared across all projects)
 └── projects/
@@ -99,9 +99,9 @@ Select any node and choose which log to read: hp.log (HotPocket consensus/networ
         ├── contract/           <- contract files for bundling
         ├── cluster-nodes.json  <- node lease tracking
         └── hp-init.cfg         <- acquisition bootstrap config
-
+```
 ## Contract Structure
-
+```
 evernode-cluster-manager/
 ├── client/
 │   └── cluster-manager.js      <- single entry point
@@ -113,7 +113,7 @@ evernode-cluster-manager/
 │   └── package.json
 ├── CHANGELOG.md
 └── layout.md                   <- full contract upgrade process documentation
-
+```
 ## Key Concepts
 
 **Consensus threshold:** Default 66%. With 3 nodes, 2 must agree. Deliberately lower than Evernode's default 80% to allow one node to be offline during upgrades without blocking operations.
