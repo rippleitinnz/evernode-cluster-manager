@@ -1,10 +1,12 @@
 {
-  "name": "v3.0-contract",
-  "version": "3.0.0",
-  "description": "v3.0 HotPocket contract",
-  "main": "index.js",
+  "name": "evernode-cluster-manager-contract",
+  "version": "4.0.0",
+  "scripts": {
+    "build": "npx ncc build src/index.js -o dist",
+    "build:prod": "npx ncc build src/index.js --minify -o dist"
+  },
   "dependencies": {
-    "adm-zip": "0.5.10",
-    "hotpocket-nodejs-contract": "0.7.4"
+    "hotpocket-nodejs-contract": "0.7.4",
+    "@vercel/ncc": "0.34.0"
   }
 }

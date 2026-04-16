@@ -19,3 +19,5 @@ contract/authorized_pubkey.txt
 contract/hp.cfg.override
 contract/install.sh
 contract/package-lock.json
+client/cluster-manager.v1.js
+client/cluster-manager.v2.js

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Evernode Cluster Manager v2.5.0
+ * Evernode Cluster Manager v3.0.0
  *
  * Single tool for deploying and managing multiple HotPocket cluster projects.
  * No host access required.
@@ -10,7 +10,7 @@
 
 'use strict';
 
-const TOOL_VERSION = 'v2.5.0';
+const TOOL_VERSION = 'v3.0.0';
 
 const path         = require('path');
 const fs           = require('fs');
@@ -22,7 +22,7 @@ const os           = require('os');
 
 // ── Tool and projects paths ───────────────────────────────────
 const TOOL_DIR       = path.dirname(__dirname);
-const TOOL_CONTRACT  = path.join(TOOL_DIR, 'contract');
+const TOOL_CONTRACT  = path.join(TOOL_DIR, 'contract', 'dist');
 const PROJECTS_DIR   = path.join(os.homedir(), '.evernode-clusters', 'projects');
 const GLOBAL_ENV     = path.join(os.homedir(), '.evernode-clusters', '.env');
 const MOMENT_SECONDS = 3600;
@@ -162,59 +162,42 @@ const waitForSync = async (targetIp, targetPort, expectedUnlCount, timeoutMs = 9
     throw new Error('Timed out waiting for sync');
 };
 
-const sendInput = async (targetIp, targetPort, msg, expectedType, waitMs = 15000) => {
+const submitInput = async (targetIp, targetPort, msg) => {
     const HP = require('hotpocket-js-client');
     const keyPair = await getKeyPair();
     const client = await HP.createClient([`wss://${targetIp}:${targetPort}`], keyPair, { protocol: HP.protocols.json });
-    return new Promise(async (resolve, reject) => {
-        let result = null;
-        client.on(HP.events.contractOutput, (r) => {
-            for (const o of r.outputs) {
-                try { const p = JSON.parse(o); if (p.type === expectedType || p.type === 'error') result = p; } catch {}
-            }
-        });
-        client.on(HP.events.disconnect, () => {});
-        const connected = await client.connect();
-        if (!connected) { reject(new Error('Connection failed')); return; }
-        const submission = await client.submitContractInput(JSON.stringify(msg));
-        const inputStatus = await submission.submissionStatus;
-        if (inputStatus.status !== 'accepted') {
-            await client.close().catch(() => {});
-            reject(new Error(`Input rejected: ${inputStatus.reason}`));
-            return;
-        }
-        await sleep(waitMs);
-        await client.close().catch(() => {});
-        if (!result) reject(new Error('No response received'));
-        else if (result.type === 'error') reject(new Error(result.message));
-        else resolve(result);
-    });
+    const connected = await client.connect();
+    if (!connected) throw new Error('Connection failed');
+    const submission = await client.submitContractInput(JSON.stringify(msg));
+    const inputStatus = await submission.submissionStatus;
+    await client.close().catch(() => {});
+    if (inputStatus.status !== 'accepted') throw new Error(`Input rejected: ${inputStatus.reason}`);
+    return true;
+};
+
+const pollUntil = async (check, timeoutMs, intervalMs = 3000) => {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        try { const result = await check(); if (result !== null) return result; } catch {}
+        await sleep(intervalMs);
+    }
+    throw new Error('Timed out waiting for confirmation');
 };
 
 // Get contract version — non-blocking, times out cleanly
 const getContractVersion = async (targetIp, targetPort) => {
     const HP = require('hotpocket-js-client');
-    const keyPair = await getKeyPair();
-    const client = await HP.createClient([`wss://${targetIp}:${targetPort}`], keyPair, { protocol: HP.protocols.json });
-    return new Promise(async (resolve) => {
-        let resolved = false;
-        const done = (val) => {
-            if (!resolved) { resolved = true; client.close().catch(() => {}); resolve(val); }
-        };
-        const timer = setTimeout(() => done('unknown'), Math.max(20000, parseInt(process.env.HP_ROUNDTIME||5000) * 3));
-        client.on(HP.events.contractOutput, (r) => {
-            for (const o of r.outputs) {
-                try { const p = JSON.parse(o); if (p.version) { clearTimeout(timer); done(p.version); } } catch {}
-            }
-        });
-        client.on(HP.events.disconnect, () => { clearTimeout(timer); done('unknown'); });
-        try {
-            const connected = await client.connect();
-            if (!connected) { clearTimeout(timer); done('unknown'); return; }
-            const submission = await client.submitContractInput(JSON.stringify({ type: 'status' }));
-            await submission.submissionStatus;
-        } catch { clearTimeout(timer); done('unknown'); }
-    });
+    try {
+        const keyPair = await HP.generateKeys();
+        const client = await HP.createClient([`wss://${targetIp}:${targetPort}`], keyPair, { protocol: HP.protocols.json });
+        const connected = await client.connect();
+        if (!connected) return 'unknown';
+        const raw = await client.submitContractReadRequest(JSON.stringify({ type: 'status' }));
+        await client.close().catch(() => {});
+        if (!raw) return 'unknown';
+        const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        return p.version || 'unknown';
+    } catch { return 'unknown'; }
 };
 
 const stripAnsi = (str) => str.replace(/\u001b\[[0-9;]*m/g, '');
@@ -227,8 +210,6 @@ const parseEvmOutput = (raw) => {
     } catch { return null; }
 };
 
-// ── Host Finder ───────────────────────────────────────────────
-
 // ── Fast host finder via local API ───────────────────────────
 const findHostsViaAPI = async (apiUrl, minSlots, targetCount, minRep, includeUnscored) => {
     const url = apiUrl.replace(/\/$/, '') +
@@ -236,9 +217,9 @@ const findHostsViaAPI = async (apiUrl, minSlots, targetCount, minRep, includeUns
         '&minSlots=' + minSlots +
         '&minRep=' + (minRep || 200) +
         (includeUnscored ? '&includeUnscored=true' : '') +
-        '&minXah=5&minEvr=1' +
+        '&minXah=1&minEvr=0.01' +
         '&sortBy=hostReputation&sortDir=desc' +
-        '&limit=' + targetCount;
+        '&limit=' + (targetCount * 10);
 
     return new Promise((resolve, reject) => {
         const mod = url.startsWith('https') ? require('https') : require('http');
@@ -250,8 +231,23 @@ const findHostsViaAPI = async (apiUrl, minSlots, targetCount, minRep, includeUns
                     const data = JSON.parse(d);
                     if (!data.success) { reject(new Error(data.error || 'API error')); return; }
 
-                    // Fetch balances for returned hosts
-                    const hosts = data.hosts;
+                    // Deduplicate by operator — max 3 per operator for diversity
+                    const domainCount = {};
+                    const getOperator = (domain) => {
+                        if (!domain) return 'unknown';
+                        // Strip leading node numbers e.g. n1234.bisdaknode1051-1100.ovh -> bisdaknode
+                        const stripped = domain.replace(/^[a-z0-9]+-?\d*\./, '');
+                        // Extract meaningful operator name from subdomain
+                        const parts = stripped.split('.');
+                        // Use first subdomain part, strip trailing numbers
+                        const base = parts[0].replace(/\d+(-\d+)?$/, '').replace(/-$/, '');
+                        return base || parts.slice(-2).join('.');
+                    };
+                    const hosts = data.hosts.filter(h => {
+                        const operator = getOperator(h.domain || '');
+                        domainCount[operator] = (domainCount[operator] || 0) + 1;
+                        return domainCount[operator] <= 3;
+                    }).slice(0, targetCount);
                     // Fetch cache age
                     const ageMs = hosts.length > 0 ? Date.now() - hosts[0].lastUpdated : 0;
                     const ageMin = Math.round(ageMs / 60000);
@@ -470,7 +466,7 @@ const findHosts = async (minSlots = 1, targetCount = 20, minRep = 200, includeUn
         (h.sashimonoVersion||'?')
     ));
     console.log('  '+hr(131));
-    console.log('\n  ' + found.length + ' host(s) verified — active, funded and reputation >= ' + MIN_REP + '.\n  Tip: Choose hosts with Total=1 to ensure evdevkit deploys one node per host.\n');
+    console.log('\n  ' + found.length + ' host(s) verified — active, funded and reputation >= ' + MIN_REP + '.\n  Tip: Results filtered to exactly 1 available slot per host to avoid evdevkit chunk-size bug.\n');
     return found;
 };
 
@@ -735,7 +731,9 @@ const opDeploy = async () => {
 
     console.log('');
     console.log('[1/3] Installing contract dependencies...');
-    execSync(`npm install --prefix ${CONTRACT_DIR} --silent`);
+    const pkgJson = path.join(CONTRACT_DIR, 'package.json');
+    const hasDeps = fs.existsSync(pkgJson) && Object.keys(JSON.parse(fs.readFileSync(pkgJson,'utf8')).dependencies || {}).length > 0;
+    if (hasDeps) execSync(`npm install --prefix ${CONTRACT_DIR} --silent`);
     console.log('      ✓ Done.');
 
     console.log('[2/3] Writing authorized_pubkey.txt...');
@@ -770,8 +768,15 @@ const opDeploy = async () => {
         port       = (await ask('  Node user port: ')).trim();
     } else {
         contractId = nodes[0].contract_id;
-        ip         = nodes[0].domain;
-        port       = String(nodes[0].user_port);
+        // Try each node until one connects
+        let connected = false;
+        for (const node of nodes) {
+            try {
+                const stat = await getStatus(node.domain, String(node.user_port));
+                if (stat) { ip = node.domain; port = String(node.user_port); connected = true; break; }
+            } catch {}
+        }
+        if (!connected) { ip = nodes[0].domain; port = String(nodes[0].user_port); }
 
         const nodeRecords = nodes.map(n => ({
             pubkey           : n.pubkey,
@@ -819,7 +824,7 @@ const opStatus = async () => {
         console.log(`  Round Time       : ${stat.roundTime}ms`);
         console.log(`  UNL Count        : ${stat.currentUnl.length}`);
         console.log('  UNL Nodes        :');
-        stat.currentUnl.forEach((pk,i)=>{ const n=nodes.find(n=>n.pubkey===pk); console.log(`    [${i}] ${pk}${n?` (${timeRemaining(n).text})`:''}`); });
+        stat.currentUnl.forEach((pk,i)=>{ const n=nodes.find(n=>n.pubkey===pk); console.log(`    [${i}] ${pk.slice(0,20)}… ${n?n.domain:'(unknown)'} ${n?`(${timeRemaining(n).text})`:''}`); });
         console.log('  Peers            :');
         stat.peers.forEach(p=>console.log(`    ${p}`));
         console.log('─────────────────────────────────────────────────────\n');
@@ -832,35 +837,49 @@ const opUpdateContract = async () => {
     let stat;
     try {
         stat = await getStatus(ip, port);
-        if (stat.voteStatus!=='synced') { console.error('  ✗ Cluster not synced. Aborting.'); return; }
+        if (stat.voteStatus !== 'synced') { console.error('  ✗ Cluster not synced. Aborting.'); return; }
         console.log(`  ✓ Synced. UNL=${stat.currentUnl.length}`);
     } catch(e) { console.error(`  ✗ ${e.message}`); return; }
 
-    const newVersion=(await ask('  New version string (e.g. v1.0.1): ')).trim();
+    const currentVersion = await getContractVersion(ip, port);
+    console.log(`  Current version  : ${currentVersion}`);
+    const newVersion = (await ask('  New version string (e.g. v1.0.1): ')).trim();
     if (!newVersion) { console.log('  Cancelled.'); return; }
 
-    const AdmZip = require('adm-zip');
-    const indexPath=path.join(CONTRACT_DIR,'index.js');
-    let code=fs.readFileSync(indexPath,'utf8');
-    const cur=(code.match(/const CONTRACT_VERSION\s+=\s+'([^']+)'/)||[])[1];
-    if (cur) {
-        code=code.replace(`const CONTRACT_VERSION       = '${cur}'`,`const CONTRACT_VERSION       = '${newVersion}'`);
-        fs.writeFileSync(indexPath,code);
-        console.log(`  Updated: ${cur} → ${newVersion}`);
+    const srcIndex = path.join(TOOL_DIR, 'contract', 'src', 'index.js');
+    if (fs.existsSync(srcIndex)) {
+        let src = fs.readFileSync(srcIndex, 'utf8');
+        src = src.replace(/const VERSION\s*=\s*'[^']+'/,  `const VERSION   = '${newVersion}'`);
+        fs.writeFileSync(srcIndex, src);
+        execSync(`cd ${path.join(TOOL_DIR, 'contract')} && npm run build`, { encoding: 'utf8' });
+        console.log(`  ✓ Rebuilt contract at ${newVersion}`);
     }
 
-    const zip=new AdmZip(); zip.addLocalFolder(CONTRACT_DIR);
-    const buf=zip.toBuffer();
-    console.log(`  Bundle: ${(buf.length/1024).toFixed(1)} KB`);
+    const builtIndex = path.join(TOOL_CONTRACT, 'index.js');
+    fs.copyFileSync(builtIndex, path.join(CONTRACT_DIR, 'index.js'));
+    console.log('  ✓ Copied built contract to project.');
 
+    const firstNode = stat.currentUnl[0];
+    execSync(
+        `bash -c 'set -a; source ${GLOBAL_ENV} 2>/dev/null; source ${ENV_FILE}; set +a; sudo -E evdevkit bundle ${CONTRACT_DIR} ${firstNode} /usr/bin/node -a index.js'`,
+        { encoding: 'utf8', cwd: PROJECT_DIR }
+    );
+    const bundlePath = path.join(PROJECT_DIR, 'bundle', 'bundle.zip');
+    console.log(`  ✓ Bundle created. ${(fs.statSync(bundlePath).size/1024).toFixed(1)} KB`);
+
+    const bundle = fs.readFileSync(bundlePath).toString('base64');
+    console.log('  Sending upgrade...');
     try {
-        const result=await sendInput(ip,port,{type:'updateContract',newVersion,bundle:buf.toString('base64')},'updateContract',20000);
-        console.log(`\n  ✓ Updated. Was: ${result.version} → Now: ${newVersion} | LCL: ${result.lclSeqNo}`);
-        await waitForSync(ip,port,stat.currentUnl.length);
-    } catch(e) {
-        if (cur) { code=code.replace(`const CONTRACT_VERSION       = '${newVersion}'`,`const CONTRACT_VERSION       = '${cur}'`); fs.writeFileSync(indexPath,code); }
-        console.error(`\n  ✗ Update failed: ${e.message}. Version reverted.`);
-    }
+        await submitInput(ip, port, { type: 'upgrade', bundle });
+        console.log('  ✓ Accepted. Waiting for version to update...');
+        const roundtime = parseInt(process.env.HP_ROUNDTIME || 6000);
+        await pollUntil(async () => {
+            const v = await getContractVersion(ip, port);
+            process.stdout.write(`  Checking version: ${v}\r`);
+            return v === newVersion ? v : null;
+        }, roundtime * 20);
+        console.log(`\n  ✓ Contract updated to ${newVersion}`);
+    } catch(e) { console.error(`\n  ✗ Upgrade failed: ${e.message}`); return; }
     console.log('─────────────────────────────────────────────────────\n');
 };
 
@@ -881,24 +900,42 @@ const opAddNode = async () => {
     const moments=(await ask(`  Life moments (default ${process.env.DEFAULT_MOMENTS||3}): `)).trim()||(process.env.DEFAULT_MOMENTS||'3');
     if (!extHost) { console.log('  Cancelled.'); return; }
 
-    // Verify host is available before acquiring
     const { allOk: hostOk } = await verifyHosts([extHost], 1);
     if (hostOk === false) {
         const proceed = (await ask('  Host has no available slots. Proceed anyway? (yes/y or Enter to cancel): ')).trim();
         if (proceed !== 'yes' && proceed !== 'y') { console.log('  Cancelled.'); return; }
-    } else if (hostOk === null) {
-        const proceed = (await ask('  Could not verify host. Proceed anyway? (yes/y or Enter to cancel): ')).trim();
-        if (proceed !== 'yes' && proceed !== 'y') { console.log('  Cancelled.'); return; }
     }
+
+    // Write hp-init.cfg with peer and UNL info — no bundle/deploy needed
+    const roundtime = parseInt(process.env.HP_ROUNDTIME||5000);
+    const threshold = parseInt(process.env.HP_THRESHOLD||66);
+    const logLevel = process.env.HP_LOG_LEVEL||'dbg';
+    const initCfg = {
+        contract: {
+            bin_path: '/usr/bin/node',
+            bin_args: 'index.js',
+            consensus: { roundtime, threshold },
+            unl: [stat.currentUnl[0]]
+        },
+        mesh: {
+            peer_discovery: { enabled: process.env.HP_PEER_DISCOVERY==='true' },
+            known_peers: stat.peers.length > 0 ? stat.peers : [`${ip}:${parseInt(port)-1}`]
+        },
+        log: { log_level: logLevel }
+    };
+    const initCfgPath = path.join(PROJECT_DIR, 'node-init-temp.cfg');
+    fs.writeFileSync(initCfgPath, JSON.stringify(initCfg, null, 2));
+    console.log(`  ✓ Init config written (peer: ${initCfg.mesh.known_peers[0]})`);
 
     let acquireOutput;
     try {
         acquireOutput=execSync(
-            `bash -c 'set -a; source ${GLOBAL_ENV} 2>/dev/null; source ${ENV_FILE}; set +a; unset EV_HP_OVERRIDE_CFG_PATH; sudo -E evdevkit acquire ${extHost} -m ${moments} -c ${contractId}'`,
+            `bash -c 'set -a; source ${GLOBAL_ENV} 2>/dev/null; source ${ENV_FILE}; set +a; unset EV_HP_OVERRIDE_CFG_PATH; export EV_HP_INIT_CFG_PATH=${initCfgPath}; sudo -E evdevkit acquire ${extHost} -m ${moments} -c ${contractId}'`,
             {encoding:'utf8'}
         );
         console.log(acquireOutput);
-    } catch(e) { console.error(`  ✗ Acquire failed: ${e.message}`); return; }
+    } catch(e) { console.error(`  ✗ Acquire failed: ${e.message}`); fs.unlinkSync(initCfgPath); return; }
+    fs.unlinkSync(initCfgPath);
 
     const pub  =(acquireOutput.match(/pubkey['":\s]+['"]?(ed[a-f0-9]{64})['"]?/)||[])[1];
     const peer =(acquireOutput.match(/peer_port['":\s]+['"]?(\d+)['"]?/)||[])[1];
@@ -908,47 +945,22 @@ const opAddNode = async () => {
     const ts   =parseInt((acquireOutput.match(/created_timestamp['":\s]+(\d+)/)||[])[1]||Date.now());
     if (!pub||!peer||!user||!dom) { console.error('  ✗ Could not parse acquire output.'); return; }
 
-    console.log('\n  ── STEP 2: Override config ───────────────────────');
-    const allPubkeys=[...stat.currentUnl,pub];
-    const overridePath=path.join(PROJECT_DIR,'node-override-temp.cfg');
-    fs.writeFileSync(overridePath,JSON.stringify({
-        contract:{bin_path:'/usr/bin/node',bin_args:'index.js',consensus:{roundtime:parseInt(process.env.HP_ROUNDTIME||5000),threshold:parseInt(process.env.HP_THRESHOLD||66)},unl:allPubkeys},
-        mesh:{peer_discovery:{enabled:process.env.HP_PEER_DISCOVERY==='true'},known_peers:stat.peers}
-    },null,2));
-    console.log(`  ✓ ${allPubkeys.length} nodes in UNL`);
-
-    console.log('\n  ── STEP 3: Bundle ────────────────────────────────');
+    console.log('\n  ── STEP 2: Add to UNL ────────────────────────────');
     try {
-        execSync(
-            `bash -c 'set -a; source ${GLOBAL_ENV} 2>/dev/null; source ${ENV_FILE}; set +a; export EV_HP_OVERRIDE_CFG_PATH=${overridePath}; sudo -E evdevkit bundle ${CONTRACT_DIR} ${pub} /usr/bin/node -a index.js'`,
-            {encoding:'utf8',cwd:PROJECT_DIR}
-        );
-        console.log('  ✓ Bundle created.');
-    } catch(e) { console.error(`  ✗ Bundle failed: ${e.message}`); fs.unlinkSync(overridePath); return; }
-
-    console.log('\n  ── STEP 4: Deploy ────────────────────────────────');
-    try {
-        const out=execSync(
-            `bash -c 'set -a; source ${GLOBAL_ENV} 2>/dev/null; source ${ENV_FILE}; set +a; sudo -E evdevkit deploy ${PROJECT_DIR}/bundle/bundle.zip ${dom} ${user}'`,
-            {encoding:'utf8'}
-        );
-        console.log(out);
-        if (!out.includes('Contract bundle uploaded')) { console.error('  ✗ Deploy may have failed.'); fs.unlinkSync(overridePath); return; }
-        console.log('  ✓ Bundle deployed.');
-    } catch(e) { console.error(`  ✗ Deploy failed: ${e.message}`); fs.unlinkSync(overridePath); return; }
-    fs.unlinkSync(overridePath);
-
-    console.log('\n  ── STEP 5: Add to UNL ────────────────────────────');
-    try {
-        const result=await sendInput(ip,port,{type:'addNode',pubkey:pub,ip:dom,peerPort:parseInt(peer)},'addNode',15000);
-        console.log(`\n  ✓ Node added. UNL=${result.newUnlCount} LCL=${result.lclSeqNo}`);
-        const nodes=loadNodes();
-        nodes.push({pubkey:pub,name,host:extHost,domain:dom,userPort:parseInt(user),peerPort:parseInt(peer),createdTimestamp:ts,lifeMoments:parseInt(moments)});
+        await submitInput(ip, port, { type: 'addNode', pubkey: pub, ip: dom, peerPort: parseInt(peer) });
+        console.log('  ✓ Accepted. Saving node and waiting for UNL update...');
+        const nodes = loadNodes();
+        nodes.push({ pubkey: pub, name, host: extHost, domain: dom, userPort: parseInt(user), peerPort: parseInt(peer), createdTimestamp: ts, lifeMoments: parseInt(moments) });
         saveNodes(nodes);
         console.log('  ✓ Saved to cluster-nodes.json');
-        await waitForSync(ip,port,result.newUnlCount,90000);
-        const finalStat=await getStatus(ip,port);
-        console.log(`\n  Vote Status: ${finalStat.voteStatus} | UNL: ${finalStat.currentUnl.length} | Peers: ${finalStat.peers.join(', ')}`);
+        const expectedUnl = stat.currentUnl.length + 1;
+        await pollUntil(async () => {
+            const s = await getStatus(ip, port);
+            process.stdout.write(`  UNL: ${s.currentUnl.length}/${expectedUnl} | voteStatus: ${s.voteStatus}\r`);
+            return s.currentUnl.length === expectedUnl && s.voteStatus === 'synced' ? s : null;
+        }, roundtime * 20);
+        const finalStat = await getStatus(ip, port);
+        console.log(`\n  ✓ Node added. UNL=${finalStat.currentUnl.length} | Peers: ${finalStat.peers.join(', ')}`);
     } catch(e) { console.error(`\n  ✗ Add node failed: ${e.message}`); }
     console.log('─────────────────────────────────────────────────────\n');
 };
@@ -960,7 +972,8 @@ const opRemoveNode = async () => {
         stat=await getStatus(ip,port);
         if (stat.voteStatus!=='synced') { console.error('  ✗ Cluster not synced. Aborting.'); return; }
         console.log(`  ✓ Synced. UNL=${stat.currentUnl.length}:`);
-        stat.currentUnl.forEach((pk,i)=>console.log(`    [${i}] ${pk}`));
+        const nodes = loadNodes();
+        stat.currentUnl.forEach((pk,i)=>{ const n=nodes.find(n=>n.pubkey===pk); console.log(`    [${i}] ${pk.slice(0,20)}… ${n?n.domain:'(unknown)'}`); });
     } catch(e) { console.error(`  ✗ ${e.message}`); return; }
     if (stat.currentUnl.length<=3) { console.error('  ✗ Cannot remove — minimum 3 nodes.'); return; }
 
@@ -975,11 +988,28 @@ const opRemoveNode = async () => {
     const confirm=(await ask(`  Confirm remove ${targetPubkey.slice(0,20)}…? (yes/y): `)).trim();
     if (confirm!=='yes'&&confirm!=='y') { console.log('  Cancelled.'); return; }
     try {
-        const result=await sendInput(ip,port,{type:'removeNode',pubkey:targetPubkey},'removeNode',15000);
-        console.log(`\n  ✓ Node removed. UNL=${result.newUnlCount} LCL=${result.lclSeqNo}`);
-        saveNodes(loadNodes().filter(n=>n.pubkey!==targetPubkey));
+        const nodeInfo = loadNodes().find(n => n.pubkey === targetPubkey);
+        const peerIp = nodeInfo ? nodeInfo.domain : null;
+        const peerPort = nodeInfo ? nodeInfo.peerPort : null;
+        await submitInput(ip, port, { type: 'removeNode', pubkey: targetPubkey, ip: peerIp, peerPort: parseInt(peerPort) });
+        console.log('  ✓ Accepted. Saving and waiting for UNL update...');
+        saveNodes(loadNodes().filter(n => n.pubkey !== targetPubkey));
         console.log('  ✓ Removed from cluster-nodes.json');
-        await waitForSync(ip,port,result.newUnlCount);
+        const expectedUnl = stat.currentUnl.length - 1;
+        const roundtime = parseInt(process.env.HP_ROUNDTIME || 6000);
+        await pollUntil(async () => {
+            const s = await getStatus(ip, port);
+            process.stdout.write(`  UNL: ${s.currentUnl.length}/${expectedUnl} | voteStatus: ${s.voteStatus}\r`);
+            return s.currentUnl.length === expectedUnl && s.voteStatus === 'synced' ? s : null;
+        }, roundtime * 20);
+        console.log(`\n  ✓ Node removed. UNL=${expectedUnl}`);
+        // Clean up stale peer connection
+        if (peerIp && peerPort) {
+            try {
+                await submitInput(ip, port, { type: 'removePeer', peerIp, peerPort: parseInt(peerPort) });
+                console.log(`  ✓ Peer removed: ${peerIp}:${peerPort}`);
+            } catch(e) { console.log(`  ⚠ Peer removal failed: ${e.message}`); }
+        }
     } catch(e) { console.error(`\n  ✗ Remove failed: ${e.message}`); }
     console.log('─────────────────────────────────────────────────────\n');
 };
@@ -1132,6 +1162,69 @@ const selectProject = async () => {
     }
 };
 
+const opReadLog = async () => {
+    console.log('\n── Read Node Log ────────────────────────────────────');
+    let stat;
+    try {
+        stat = await getStatus(ip, port);
+        const nodes = loadNodes();
+        stat.currentUnl.forEach((pk,i)=>{ const n=nodes.find(n=>n.pubkey===pk); console.log(`    [${i}] ${pk.slice(0,20)}… ${n?n.domain:'(unknown)'} port:${n?n.userPort:'?'}`); });
+    } catch(e) { console.error(`  ✗ ${e.message}`); return; }
+
+    const input=(await ask('\n  Node index: ')).trim();
+    if (!input) { console.log('  Cancelled.'); return; }
+    const idx = parseInt(input);
+    if (isNaN(idx)||idx<0||idx>=stat.currentUnl.length) { console.error('  ✗ Invalid index.'); return; }
+
+    const nodes = loadNodes();
+    const pk = stat.currentUnl[idx];
+    const nodeInfo = nodes.find(n=>n.pubkey===pk);
+    if (!nodeInfo) { console.error('  ✗ Node not in cluster-nodes.json.'); return; }
+
+    console.log('  Log file:');
+    console.log('    1. hp.log (HotPocket)');
+    console.log('    2. rw.stdout.log (contract stdout)');
+    console.log('    3. rw.stderr.log (contract stderr)');
+    const logChoice = (await ask('  Choice (default 1): ')).trim() || '1';
+    const logType = logChoice === '2' ? 'readContractLog' : logChoice === '3' ? 'readContractLog' : 'readLog';
+    const logFile = logChoice === '3' ? 'stderr' : 'stdout';
+    const linesStr = (await ask('  Lines to fetch (default 50): ')).trim() || '50';
+    const lines = parseInt(linesStr) || 50;
+    const tailMode = (await ask('  Auto-refresh every 5s? (yes/y or Enter to skip): ')).trim();
+    const doTail = tailMode === 'yes' || tailMode === 'y';
+
+    const fetchLog = async () => {
+        try {
+            const HP = require('hotpocket-js-client');
+            const kp = await getKeyPair();
+            const client = await HP.createClient([`wss://${nodeInfo.domain}:${nodeInfo.userPort}`], kp, { protocol: HP.protocols.json });
+            const connected = await client.connect();
+            if (!connected) { console.error('  ✗ Connection failed.'); return false; }
+            const raw = await client.submitContractReadRequest(JSON.stringify({ type: logType, lines, logFile }));
+            await client.close().catch(()=>{});
+            const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            if (p.type === 'error') { console.error(`  ✗ ${p.message}`); return false; }
+            console.clear();
+            console.log(`  Node: ${nodeInfo.domain} | Last ${lines} lines | ${new Date().toISOString()}${doTail ? ' | Ctrl+C to stop' : ''}`);
+            console.log('─'.repeat(80));
+            console.log(p.lines || 'no log data');
+            return true;
+        } catch(e) { console.error(`  ✗ ${e.message}`); return false; }
+    };
+
+    console.log(`\n  Fetching log from ${nodeInfo.domain}:${nodeInfo.userPort}...`);
+    await fetchLog();
+
+    if (doTail) {
+        console.log('\n  Tailing... press Ctrl+C to stop.');
+        const interval = setInterval(async () => { await fetchLog(); }, 5000);
+        await new Promise(resolve => {
+            process.once('SIGINT', () => { clearInterval(interval); console.log('\n  Stopped.'); resolve(); });
+        });
+    }
+    console.log('─────────────────────────────────────────────────────\n');
+};
+
 // ── Management menu ───────────────────────────────────────────
 
 const managementMenu = async () => {
@@ -1153,8 +1246,9 @@ const managementMenu = async () => {
         console.log('    5. Check node expiry');
         console.log('    6. Extend node lease');
         console.log('    7. Find available hosts');
-        console.log('    8. Switch project');
-        console.log('    9. Exit');
+        console.log('    8. Read node log');
+        console.log('    9. Switch project');
+        console.log('    0. Exit');
         console.log('');
         const choice=(await ask('  Choice: ')).trim();
         console.log('');
@@ -1167,8 +1261,9 @@ const managementMenu = async () => {
             case '5': await opCheckExpiry(); break;
             case '6': await opExtendLease(); break;
             case '7': await opFindHosts(); break;
-            case '8': return 'switch';
-            case '9': console.log('  Goodbye.\n'); rl.close(); process.exit(0);
+            case '8': await opReadLog(); break;
+            case '9': return 'switch';
+            case '0': console.log('  Goodbye.\n'); rl.close(); process.exit(0);
             default: console.log('  Invalid choice.\n');
         }
     }
