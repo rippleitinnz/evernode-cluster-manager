@@ -1,73 +1,36 @@
 # Evernode Cluster Manager
 
-A single tool for deploying and managing multiple HotPocket smart contract clusters on Evernode. No host access required.
+A single tool for deploying and managing multiple HotPocket smart contract clusters on Evernode. No host filesystem access required.
 
 ## What It Does
 
 - Manages multiple independent cluster projects from one tool
 - Deploys multi-node HotPocket contract clusters on Evernode hosts
 - Updates contract code live without restarting nodes or losing consensus
-- Adds external nodes to a running cluster without restarting
-- Removes nodes from a running cluster
-- Monitors cluster health and consensus status
-- Discovers available Evernode hosts with pricing
+- Adds external nodes to a running cluster — new nodes sync automatically from the cluster, no manual bundle/deploy required
+- Removes nodes cleanly including stale peer cleanup
+- Reads logs remotely from any node in the cluster (hp.log, stdout, stderr) — no SSH required
+- Monitors cluster health, consensus status and vote state
+- Discovers available Evernode hosts with operator diversity filtering
 - Tracks node lease expiry and extends leases
 
 ## Requirements
 
 - Node.js v20+
-- evdevkit installed globally: `npm i evdevkit -g`
-- An XRPL-XAHAU wallet funded with EVR tokens (tenant account)
+- evdevkit installed globally: npm i evdevkit -g
+- An XRPL/Xahau wallet funded with XAH and EVR tokens (tenant account)
+- Optional: A local Evernode Host Discovery API (see api.onledger.net for reference)
 
 ## Quick Start
 
-```bash
 git clone https://github.com/rippleitinnz/evernode-cluster-manager
 cd evernode-cluster-manager
 node client/cluster-manager.js
-```
 
-That's it. The tool handles everything from there.
+On first run the tool will prompt for credentials and create your first project.
 
-## How It Works
+## Management Menu
 
-Everything runs from a single command:
-
-```bash
-node ~/evernode-cluster-manager/client/cluster-manager.js
-```
-
-On first run it shows a project selector. Each project is an independent cluster with its own credentials, contract code and node tracking.
-
-```
-╔══════════════════════════════════════════════════════╗
-║          Evernode Cluster Manager                    ║
-╚══════════════════════════════════════════════════════╝
-
-  Select a project:
-
-    1. my-game             contract: 6664322e… | nodes tracked: 3
-    2. defi-app            contract: 9396fdf2… | nodes tracked: 4
-    3. nft-platform        no cluster yet
-    4. Create new project
-    5. Exit
-```
-
-### Creating a new project
-
-Select "Create new project" and the tool will ask for:
-- Project name
-- HotPocket user keys (or generate new ones)
-- XRPL-XAHAU tenant credentials
-- HotPocket settings (round time, threshold, log level)
-- Default node count and life moments
-
-### Management menu
-
-After selecting a project:
-
-```
-  What would you like to do?
     1. Check status
     2. Update contract
     3. Add a node
@@ -75,229 +38,108 @@ After selecting a project:
     5. Check node expiry
     6. Extend node lease
     7. Find available hosts
-    8. Switch project
-    9. Exit
-```
+    8. Read node log
+    9. Switch project
+    0. Exit
 
-**Option 1 — Check status**
+### Option 1 — Check Status
 
-Shows vote status, UNL nodes with time remaining, peers and LCL. `voteStatus: synced` confirms healthy consensus.
+Shows contract version, HP version, vote status, LCL, round time, UNL nodes with domain and time remaining, and connected peers. Vote Status: synced confirms healthy consensus. In HP debug logs, Vote status: 3 is the synced state code — not a node count.
 
-**Option 2 — Update contract**
+### Option 2 — Update Contract
 
-Enter a new version string (e.g. `v1.0.1`). Bundles and deploys live across all nodes. No restarts, consensus maintained.
+Enter a new version string. The tool bumps the version, rebuilds via npm run build (using @vercel/ncc to produce a single dist/index.js), bundles with evdevkit bundle, sends to the cluster as a consensus input, and polls until all nodes confirm the new version. No restarts required.
 
-**Option 3 — Add a node**
+**Consensus threshold note:** The default threshold is 66% — not Evernode's default 80%. With 3 nodes at 66%, only 2 of 3 must agree, meaning one node can be temporarily offline and upgrades still succeed. At 80% with 3 nodes all three must agree, giving zero fault tolerance. For clusters of 5+ nodes, 80% becomes more viable.
 
-Optionally find available hosts first, then enter an external host XRPL address. The tool acquires the instance with the correct contract ID, bundles with the correct UNL and peer config, deploys, adds to the running cluster and waits to confirm sync.
+### Option 3 — Add a Node
 
-**Option 4 — Remove a node**
+The tool writes a minimal hp-init.cfg with the contract ID, one peer address, one UNL pubkey, consensus settings and log level, then acquires the instance using EV_HP_INIT_CFG_PATH. HotPocket automatically syncs contract code, state and config from the existing cluster. No bundle or deploy step required. The new pubkey is then added to the UNL via consensus input and the tool polls until the cluster is synced.
 
-Select a node by index or pubkey. Will not remove if cluster would drop below 3 nodes.
+### Option 4 — Remove a Node
 
-**Option 5 — Check node expiry**
+Select a node by index or pubkey. Removes from UNL and automatically cleans up the stale peer connection. Will not remove if cluster would drop below 3 nodes.
 
-Shows time remaining for each tracked node. All nodes are tracked automatically — both from initial deployment and any nodes added via option 3.
+### Option 5 — Check Node Expiry
 
-**Option 6 — Extend node lease**
+Shows time remaining for each tracked node with expiry timestamp in UTC.
 
-Select a node by index or "all" to extend all nodes. Specify how many additional moments (hours) to add.
+### Option 6 — Extend Node Lease
 
-**Option 7 — Find available hosts**
+Select a node by index or all to extend all nodes. Specify how many additional moments (1 moment = 1 hour) to add.
 
-Scans the Evernode network for active hosts with available slots, RAM, location and pricing.
+### Option 7 — Find Available Hosts
 
-**Option 8 — Switch project**
+Queries the local Host Discovery API (or falls back to network scan) for active hosts. Results are deduplicated by operator — maximum 3 hosts per operator — so no single operator dominates the list. Default filters: active=true, minRep=200, minXah=1, minEvr=0.01.
 
-Returns to the project selector without exiting.
+### Option 8 — Read Node Log
+
+Select any node and choose which log to read: hp.log (HotPocket consensus/network), rw.stdout.log (contract stdout), or rw.stderr.log (contract stderr). Specify line count and optionally enable auto-refresh every 5 seconds. No SSH access required — logs are retrieved via the contract's read request mechanism.
+
+## Built-in Contract Handlers
+
+| Handler | Type | Purpose |
+|---------|------|---------|
+| status | readonly | Returns version, contractId, publicKey, lcl |
+| readCfg | readonly | Returns current patch.cfg contents |
+| readLog | readonly | Returns hp.log lines |
+| readContractLog | readonly | Returns rw.stdout.log or rw.stderr.log |
+| upgrade | consensus | Handles contract bundle upgrade via post_exec.sh |
+| addNode | consensus | Adds pubkey to UNL and peer connection |
+| removeNode | consensus | Removes pubkey from UNL and peer connection |
+| removePeer | consensus | Removes a stale peer connection |
 
 ## Project Storage
 
-Projects are stored in `~/.evernode-clusters/projects/` — one folder per project:
-
-```
 ~/.evernode-clusters/
+├── .env                        <- global credentials (shared across all projects)
 └── projects/
-    ├── my-game/
-    │   ├── .env                <- credentials and settings
-    │   ├── contract/           <- contract code
-    │   ├── cluster-nodes.json  <- node lease tracking
-    │   └── hp-init.cfg         <- acquisition config
-    └── defi-app/
-        ├── .env
-        ├── contract/
-        └── ...
-```
+    └── my-project/
+        ├── .env                <- project settings
+        ├── contract/           <- contract files for bundling
+        ├── cluster-nodes.json  <- node lease tracking
+        └── hp-init.cfg         <- acquisition bootstrap config
 
-Each project is completely independent — different credentials, different contract code, different cluster.
+## Contract Structure
+
+evernode-cluster-manager/
+├── client/
+│   └── cluster-manager.js      <- single entry point
+├── contract/
+│   ├── src/
+│   │   └── index.js            <- contract source (edit this)
+│   ├── dist/
+│   │   └── index.js            <- compiled output (deployed to cluster)
+│   └── package.json
+├── CHANGELOG.md
+└── layout.md                   <- full contract upgrade process documentation
 
 ## Key Concepts
 
-**Consensus threshold:** Default 66% — with 3 nodes you need 2 votes, with 4 nodes you need 3. This allows rolling node additions without losing consensus.
+**Consensus threshold:** Default 66%. With 3 nodes, 2 must agree. Deliberately lower than Evernode's default 80% to allow one node to be offline during upgrades without blocking operations.
 
-**Vote status:** `voteStatus: synced` confirms healthy consensus. In HP logs `Vote status: 3` with 4 nodes is correct — it counts votes from OTHER nodes, self is not included.
+**Adding nodes:** New nodes sync everything automatically from the existing cluster via HotPocket's built-in sync mechanism. Only the contract ID, one peer address and one UNL pubkey are needed at acquire time.
 
-**Adding nodes:** The new node is automatically acquired with the correct contract ID. The tool handles the full flow end-to-end.
+**Vote status:** synced = healthy consensus. In HP debug logs Vote status: 3 is the synced state code.
 
-**Life moments:** Each moment is approximately 1 hour. Minimum 3 moments recommended.
+**Log access:** hp.log and contract logs can be read remotely from any node via contract handlers — no SSH or host filesystem access needed.
 
-**Node tracking:** Nodes added via option 3 are saved to `cluster-nodes.json` with their lease details. Stale entries are removed automatically when they leave the UNL.
+**Node tracking:** All nodes saved to cluster-nodes.json with pubkey, domain, ports, creation timestamp and life moments. Stale entries reconciled automatically against the live UNL.
 
-## Contract Interface Specification
+## Host Discovery API
 
-For the cluster manager to fully manage a cluster, the deployed contract must implement the following input handlers. Contracts that do not implement these handlers can still be deployed and monitored, but live updates, node addition and node removal will not be available.
+Set HOST_API_URL in your project .env to use a local cached API instead of scanning the network:
 
-### Required handlers
+HOST_API_URL=http://192.168.1.50:3001
+XAHAU_WS=ws://192.168.1.50:6008
 
-All handlers receive a JSON input from the authorized user public key and must respond with a JSON output.
-
-**`status`**
-
-Returns current contract state. No timestamp or non-deterministic values — all nodes must produce identical output.
-
-Input:
-```json
-{ "type": "status" }
-```
-
-Output:
-```json
-{
-  "type": "status",
-  "version": "v1.0.0",
-  "lclSeqNo": 100,
-  "unlCount": 3,
-  "unl": ["ed123...", "ed456...", "ed789..."]
-}
-```
-
-**`updateContract`**
-
-Receives a base64-encoded zip bundle and extracts it over the current contract files. New code is active from the next round.
-
-Input:
-```json
-{
-  "type": "updateContract",
-  "newVersion": "v1.0.1",
-  "bundle": "<base64 encoded zip>"
-}
-```
-
-Output:
-```json
-{
-  "type": "updateContract",
-  "version": "v1.0.0",
-  "lclSeqNo": 100,
-  "status": "ok"
-}
-```
-
-**`addNode`**
-
-Adds a new pubkey to the UNL and initiates a peer connection. No restart required.
-
-Input:
-```json
-{
-  "type": "addNode",
-  "pubkey": "ed...",
-  "ip": "host.example.com",
-  "peerPort": 22861
-}
-```
-
-Output:
-```json
-{
-  "type": "addNode",
-  "addedPubkey": "ed...",
-  "newUnlCount": 4,
-  "lclSeqNo": 100
-}
-```
-
-**`removeNode`**
-
-Removes a pubkey from the UNL. Minimum 2 nodes must remain after removal.
-
-Input:
-```json
-{
-  "type": "removeNode",
-  "pubkey": "ed..."
-}
-```
-
-Output:
-```json
-{
-  "type": "removeNode",
-  "removedPubkey": "ed...",
-  "newUnlCount": 3,
-  "lclSeqNo": 100
-}
-```
-
-### Critical rules
-
-- **No timestamps in outputs** — `new Date()` or any non-deterministic value in contract outputs will cause output hash mismatches across nodes and break consensus
-- **Authorization** — all management handlers must verify the sender's public key against an authorized key stored in the contract state
-- **Version field required** — `ctx.updateConfig()` requires the `version` field to be present at the top level of the config object
-- **`forceTerminate: true`** — pass `true` as the third argument to `hpc.init()` to ensure clean round exit after config changes
-
-### Reference implementation
-
-The default contract template at `contract/index.js` in this repository is a fully working reference implementation of all four handlers.
+See api.onledger.net for a public reference implementation.
 
 ## Important Notes
 
-- Always delete old instances before deploying a new cluster to the same host — running clusters can corrupt the UNL of new nodes during the sync window
-- Never put `new Date()` or any non-deterministic value in contract outputs — all nodes must produce identical outputs for consensus
-- The `.env` file in each project contains private keys — never commit it to git
-
-## Known Issue: evdevkit Host Selection Bug
-
-There is a known bug in `evdevkit cluster-create` (tracked in [EvernodeXRPL/evernode-sdk#96](https://github.com/EvernodeXRPL/evernode-sdk/issues/96)) where the third host in your hosts file is systematically ignored, with the first host receiving two nodes instead.
-
-### Root cause
-
-`evdevkit cluster-create` uses a chunk-based allocation algorithm that always skips the third specified host when deploying a 3-node cluster. This is independent of host price, balance or availability.
-
-### Workaround — Use hosts with only 1 available instance slot
-
-The bug only affects hosts that have more than 1 available slot. When a host has exactly 1 slot available, `evdevkit` cannot place a second node on it and is forced to move to the next host.
-
-**How to guarantee one node per host:**
-
-1. Use **Option 7 — Find available hosts** and look at the **Total** column
-2. Choose hosts where `Total = 1` (only one instance slot configured on that host)
-3. Or fill up a host's spare slots first by deploying placeholder contracts, leaving exactly 1 slot free
-
-The find-hosts results table shows both `Avail` (available slots) and `Total` (total slots configured). A host showing `Avail: 1 | Total: 1` is ideal — it has exactly one slot and evdevkit will be forced to use each host exactly once.
-
-**Example — filling spare slots on your own host:**
-
-If your host has 6 total slots and you want to use it with only 1 slot available, deploy 5 placeholder instances first using `evdevkit acquire` with any contract ID, then use that host in your cluster deployment.
-
-### Alternative workaround — Add nodes after initial deploy
-
-1. Deploy the initial 3-node cluster on a single host (guaranteed to work)
-2. Use **Option 3 — Add a node** to add nodes to your preferred external hosts
-3. Use **Option 4 — Remove a node** to remove the original single-host nodes
-
-This gives full control over which hosts your cluster uses, at the cost of a few extra steps.
-
-## File Structure
-
-```
-evernode-cluster-manager/       <- clone this repo once
-├── client/
-│   └── cluster-manager.js      <- single entry point for everything
-├── contract/
-│   ├── index.js                <- HotPocket contract template
-│   └── package.json
-└── config/
-    └── .env.example            <- example config for reference
-```
+- The .env files contain private keys — never commit them to git (gitignored by default)
+- Never use new Date() or non-deterministic values in contract outputs — all nodes must produce identical outputs
+- Always ensure the cluster is synced before performing upgrade or node operations
+- Minimum viable cluster size is 3 nodes
+- Backups of contract state are created automatically before each upgrade (last 5 kept)
+- If an upgrade fails, post_exec.sh automatically rolls back patch.cfg
