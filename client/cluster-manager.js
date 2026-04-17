@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Evernode Cluster Manager v3.0.0
+ * Evernode Client Cluster Manager v3.0.0
  *
  * Single tool for deploying and managing multiple HotPocket cluster projects.
  * No host access required.
@@ -1206,7 +1206,7 @@ const managementMenu = async () => {
 
 const main = async () => {
     console.log('');
-    const title = `  Evernode Cluster Manager  ${TOOL_VERSION}  `;
+    const title = `  Evernode Client Cluster Manager  ${TOOL_VERSION}  `;
     const width = 54;
     const pad = width - title.length;
     const padStr = ' '.repeat(Math.max(0, pad));
