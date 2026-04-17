@@ -124,3 +124,11 @@
 - **Auto-repair confirmation** — restored UNL check and confirmation prompt before removing dead node
 - **Report host** — changed from index-based (`r3`) to full address only for safety
 - **`weaklyConnected` display** — added spacing around warning indicator in status output
+
+### API and fallback cleanup (v3.0.0)
+
+- **Removed fallback network scan** — xrplwin API, fallback scan removed entirely. Will add later if needed.
+- **Default HOST_API_URL** — `https://api.onledger.net` is now the default in code, no configuration needed for new users
+- **`saveGlobalEnv`** — writes `HOST_API_URL=https://api.onledger.net` to global `.env` on first-time setup
+- **`reportHost`** — now uses same default API URL, no longer requires explicit `HOST_API_URL` config
+- **Dead code removed** — `checkBalances`, `checkReputation`, `spawnSync`, top-level `https` import all removed along with fallback scan
