@@ -132,3 +132,12 @@
 - **`saveGlobalEnv`** — writes `HOST_API_URL=https://api.onledger.net` to global `.env` on first-time setup
 - **`reportHost`** — now uses same default API URL, no longer requires explicit `HOST_API_URL` config
 - **Dead code removed** — `checkBalances`, `checkReputation`, `spawnSync`, top-level `https` import all removed along with fallback scan
+
+### Input validation and UX fixes (v3.0.0)
+
+- **`askYesNo` helper** — all yes/no prompts now loop until valid input (`yes`, `y`, or Enter). Any other input re-prompts with a reminder, preventing accidental actions from mistyped input.
+- **Main loop fix** — pressing Enter at the deploy prompt now correctly returns to the project selector instead of exiting the tool.
+- **`isYes` helper** — centralised yes check used consistently throughout.
+- **Single-slot host guarantee** — host finder now always returns at least 10 single-slot hosts at the top of results, clearly labelled as recommended for deployment.
+- **cluster-create bug warning** — deploy flow warns about the evdevkit chunk-size bug and explains the single-slot workaround.
+- **Icon spacing** — added consistent spacing after all ⚠, ✓, ✗ icons in console output.
