@@ -143,7 +143,7 @@ evernode-cluster-manager/
 
 **Heartbeat filter:** The host finder only returns hosts that have sent a heartbeat in each of the last 3 hourly windows. This ensures hosts are consistently active — not just registered or occasionally online. Hosts that have gone silent (out of funds, misconfigured, offline) are automatically excluded.
 
-**Cluster health:** If a node becomes unreachable, `Vote Status` shows `⚠ WEAKLY CONNECTED`. The tool identifies the unreachable node by comparing the UNL against the connected peer list and offers to replace it automatically.
+**Cluster health:** If a node becomes unreachable, `Vote Status` shows `⚠  WEAKLY CONNECTED`. The tool identifies the unreachable node by comparing the UNL against the connected peer list and offers to replace it automatically.
 
 **Reporting bad hosts:** After finding hosts (option 7), enter the full host XRPL address to report a host that failed to accept a contract or has closed ports. Always use the full address — many hosts share similar prefixes. Reported hosts are excluded from future searches for 7 days via the Host Discovery API.
 
@@ -153,11 +153,11 @@ The cluster manager can use a host discovery API for fast cached host lookups in
 
 Set the following in your project .env:
 
-HOST_API_URL=https://api.onledger.net
+```HOST_API_URL=https://api.onledger.net```
 
 Optionally, specify a Xahau node (defaults to public node if not set):
 
-XAHAU_WS=wss://xahau.network
+```XAHAU_WS=wss://xahau.network```
 
 Without HOST_API_URL set, the tool falls back to scanning the Evernode network directly which takes 2-3 minutes.
 
