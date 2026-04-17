@@ -96,3 +96,13 @@
 - **Unreachable node identification** — compares UNL against peer list to identify which node is unreachable
 - **Auto-repair flow** — when weakly connected, offers to replace the unreachable node automatically: adds new node, waits 2 roundtimes for stabilisation, then removes the dead node
 - **Vote participation display** — UNL nodes show ✓/✗ reachability status when cluster is weakly connected
+
+### Auto-repair improvements (v3.0.0 continued)
+
+- **Confirmation before remove** — auto-repair now asks before removing the dead node rather than doing it automatically
+- **Dead node UNL check** — checks if dead node already left the UNL naturally before attempting removal, avoiding unnecessary `removeNode` calls
+
+### Auto-repair improvements (v3.0.0 continued)
+
+- **Confirmation before remove** — auto-repair now asks before removing the dead node rather than doing it automatically
+- **Dead node UNL check** — checks if dead node already left the UNL naturally before attempting removal, avoiding unnecessary `removeNode` calls
