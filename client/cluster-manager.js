@@ -212,13 +212,14 @@ const parseEvmOutput = (raw) => {
 };
 
 // ── Fast host finder via local API ───────────────────────────
-const findHostsViaAPI = async (apiUrl, minSlots, targetCount, minRep, includeUnscored) => {
+const findHostsViaAPI = async (apiUrl, minSlots, targetCount, minRep, includeUnscored, allowReport = false) => {
     const url = apiUrl.replace(/\/$/, '') +
         '/hosts?active=true' +
         '&minSlots=' + minSlots +
         '&minRep=' + (minRep || 200) +
         (includeUnscored ? '&includeUnscored=true' : '') +
         '&minXah=1&minEvr=0.01' +
+        '&minLastHeartbeat=180' +
         '&minLastHeartbeat=180' +
         '&sortBy=hostReputation&sortDir=desc' +
         '&limit=' + (targetCount * 10);
@@ -282,7 +283,9 @@ const findHostsViaAPI = async (apiUrl, minSlots, targetCount, minRep, includeUns
                         (h.version || '?')
                     ));
                     console.log('  ' + hr(131));
-                    console.log('\n  ' + hosts.length + ' host(s) from local API cache.\n');
+                    console.log('\n  ' + hosts.length + ' host(s) from local API cache.');
+                    if (allowReport) console.log('  Tip: To report a bad host, enter r<number> (e.g. r3)');
+                    console.log('');
 
                     resolve(hosts);
                 } catch(e) { reject(e); }
@@ -354,13 +357,13 @@ const checkReputation = async (addresses) => {
 };
 
 // ── Host Finder ───────────────────────────────────────────────
-const findHosts = async (minSlots = 1, targetCount = 20, minRep = 200, includeUnscored = false) => {
+const findHosts = async (minSlots = 1, targetCount = 20, minRep = 200, includeUnscored = false, allowReport = false) => {
     // Use local API if configured
     const apiUrl = process.env.HOST_API_URL;
     if (apiUrl) {
         try {
             console.log('\n  Using local host API: ' + apiUrl);
-            return await findHostsViaAPI(apiUrl, minSlots, targetCount, minRep, includeUnscored);
+            return await findHostsViaAPI(apiUrl, minSlots, targetCount, minRep, includeUnscored, allowReport);
         } catch(e) {
             console.log('  ⚠ API unavailable (' + e.message + ') — falling back to network scan...');
         }
@@ -1114,12 +1117,54 @@ const opExtendLease = async () => {
     console.log('─────────────────────────────────────────────────────\n');
 };
 
+const reportHost = async (address, domain) => {
+    const apiUrl = process.env.HOST_API_URL;
+    if (!apiUrl) { console.log('  ⚠ No HOST_API_URL configured — cannot report.'); return; }
+    const reason = (await ask('  Reason (e.g. user port closed, contract failed): ')).trim() || 'reported by user';
+    const url = apiUrl.replace(/\/$/, '') + '/hosts/' + address + '/report';
+    return new Promise((resolve) => {
+        const mod = url.startsWith('https') ? require('https') : require('http');
+        const req = mod.request(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, (res) => {
+            let d = '';
+            res.on('data', c => d += c);
+            res.on('end', () => {
+                try {
+                    const r = JSON.parse(d);
+                    if (r.success) console.log(`  ✓ Host ${domain} reported and excluded for 7 days.`);
+                    else console.log('  ✗ Report failed:', r.error);
+                } catch { console.log('  ✗ Report failed.'); }
+                resolve();
+            });
+        });
+        req.on('error', () => { console.log('  ✗ Could not reach API.'); resolve(); });
+        req.write(JSON.stringify({ reason }));
+        req.end();
+    });
+};
+
 const opFindHosts = async () => {
     const minSlots=parseInt((await ask('  Minimum available slots (default 1): ')).trim()||'1');
     const target=parseInt((await ask('  Number of hosts to find (default 20): ')).trim()||'20');
     const minRep=parseInt((await ask('  Minimum reputation score (default 200, max 252): ')).trim()||'200');
     const unscored=(await ask('  Include unscored hosts rep=0? (yes/y or Enter to skip): ')).trim();
-    await findHosts(minSlots, target, minRep, unscored==='yes'||unscored==='y');
+    const hosts = await findHosts(minSlots, target, minRep, unscored==='yes'||unscored==='y', true);
+    if (!hosts || !hosts.length) return;
+    while (true) {
+        const input = (await ask('  Report a host? (r<number> e.g. r3, or Enter to skip): ')).trim();
+        if (!input) break;
+        const match = input.match(/^r(\d+)$/i);
+        let host;
+        if (match) {
+            const idx = parseInt(match[1]) - 1;
+            if (idx < 0 || idx >= hosts.length) { console.log('  Invalid index.'); continue; }
+            host = hosts[idx];
+        } else {
+            // Try full address match
+            host = hosts.find(h => h.address === input);
+            if (!host) { console.log('  Invalid — use r<number> e.g. r3, or full address'); continue; }
+        }
+        await reportHost(host.address, host.domain);
+    }
 };
 
 
