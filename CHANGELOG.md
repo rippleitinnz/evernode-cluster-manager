@@ -75,3 +75,9 @@
 
 - **Absolute path fallbacks** — `ws` and `evernode-js-client` now try local `node_modules` first, falling back to evdevkit global path. Works on both standard Linux installs and systems without global evdevkit.
 - **Optional dependencies** — added `ws` and `evernode-js-client` as `optionalDependencies` in `client/package.json` for systems that need local installs.
+
+### Windows compatibility (v3.0.0)
+
+- **Removed all bash dependencies** — replaced all `bash -c 'set -a; source ...'` calls with direct `execSync` using `process.env`. No bash required on any platform.
+- **Platform-aware sudo** — added `const sudo` helper that uses `sudo -E` on Linux/Mac and empty string on Windows.
+- **All env vars loaded via `loadProjectEnv()`** — credentials no longer need to be sourced via bash subshell, they are already in `process.env` when needed.

@@ -49,6 +49,7 @@ const ask = (q) => new Promise(resolve => rl.question(q, resolve));
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const fmt = () => new Date().toISOString().replace('T',' ').replace(/\..+/,'');
 const hr = (n=52) => '─'.repeat(n);
+const sudo = process.platform !== 'win32' ? 'sudo -E ' : '';
 
 // ── Global env ────────────────────────────────────────────────
 
@@ -746,9 +747,11 @@ const opDeploy = async () => {
     console.log('[3/3] Running evdevkit cluster-create...\n');
     let clusterOutput = '';
     try {
+        process.env.EV_HP_INIT_CFG_PATH = INITCFG;
+        delete process.env.EV_HP_OVERRIDE_CFG_PATH;
         clusterOutput = execSync(
-            `bash -c 'set -a; source ${GLOBAL_ENV} 2>/dev/null; source ${ENV_FILE}; set +a; unset EV_HP_OVERRIDE_CFG_PATH; export EV_HP_INIT_CFG_PATH=${INITCFG}; sudo -E evdevkit cluster-create ${nodeCount} -m ${moments} ${CONTRACT_DIR} /usr/bin/node ${hostsFile} -a index.js'`,
-            { encoding:'utf8' }
+            `${sudo}evdevkit cluster-create ${nodeCount} -m ${moments} "${CONTRACT_DIR}" /usr/bin/node "${hostsFile}" -a index.js`,
+            { encoding:'utf8', env: process.env }
         );
         process.stdout.write(clusterOutput);
     } catch(e) {
@@ -861,8 +864,8 @@ const opUpdateContract = async () => {
 
     const firstNode = stat.currentUnl[0];
     execSync(
-        `bash -c 'set -a; source ${GLOBAL_ENV} 2>/dev/null; source ${ENV_FILE}; set +a; sudo -E evdevkit bundle ${CONTRACT_DIR} ${firstNode} /usr/bin/node -a index.js'`,
-        { encoding: 'utf8', cwd: PROJECT_DIR }
+        `${sudo}evdevkit bundle "${CONTRACT_DIR}" ${firstNode} /usr/bin/node -a index.js`,
+        { encoding: 'utf8', cwd: PROJECT_DIR, env: process.env }
     );
     const bundlePath = path.join(PROJECT_DIR, 'bundle', 'bundle.zip');
     console.log(`  ✓ Bundle created. ${(fs.statSync(bundlePath).size/1024).toFixed(1)} KB`);
@@ -929,9 +932,11 @@ const opAddNode = async () => {
 
     let acquireOutput;
     try {
+        process.env.EV_HP_INIT_CFG_PATH = initCfgPath;
+        delete process.env.EV_HP_OVERRIDE_CFG_PATH;
         acquireOutput=execSync(
-            `bash -c 'set -a; source ${GLOBAL_ENV} 2>/dev/null; source ${ENV_FILE}; set +a; unset EV_HP_OVERRIDE_CFG_PATH; export EV_HP_INIT_CFG_PATH=${initCfgPath}; sudo -E evdevkit acquire ${extHost} -m ${moments} -c ${contractId}'`,
-            {encoding:'utf8'}
+            `${sudo}evdevkit acquire ${extHost} -m ${moments} -c ${contractId}`,
+            {encoding:'utf8', env: process.env}
         );
         console.log(acquireOutput);
     } catch(e) { console.error(`  ✗ Acquire failed: ${e.message}`); fs.unlinkSync(initCfgPath); return; }
@@ -1050,8 +1055,8 @@ const opExtendLease = async () => {
         process.stdout.write(`  Extending ${node.pubkey.slice(0,20)}… by ${addMoments} moment(s)...`);
         try {
             execSync(
-                `bash -c 'set -a; source ${GLOBAL_ENV} 2>/dev/null; source ${ENV_FILE}; set +a; sudo -E evdevkit extend-instance ${node.host} ${node.name} -m ${addMoments}'`,
-                {encoding:'utf8'}
+                `${sudo}evdevkit extend-instance ${node.host} ${node.name} -m ${addMoments}`,
+                {encoding:'utf8', env: process.env}
             );
             node.lifeMoments+=addMoments;
             console.log(` ✓ Total: ${node.lifeMoments} moments.`);
