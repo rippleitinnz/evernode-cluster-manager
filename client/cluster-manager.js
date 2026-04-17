@@ -47,7 +47,6 @@ const setProject = (projectDir) => {
 const rl  = readline.createInterface({ input: process.stdin, output: process.stdout });
 const ask = (q) => new Promise(resolve => rl.question(q, resolve));
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const fmt = () => new Date().toISOString().replace('T',' ').replace(/\..+/,'');
 const hr = (n=52) => '─'.repeat(n);
 const sudo = process.platform !== 'win32' ? 'sudo -E ' : '';
 
@@ -146,23 +145,6 @@ const getStatus = async (targetIp, targetPort) => {
     return stat;
 };
 
-const waitForSync = async (targetIp, targetPort, expectedUnlCount, timeoutMs = 90000) => {
-    const start = Date.now();
-    console.log(`\n  Waiting for cluster to sync (up to ${timeoutMs/1000}s)...`);
-    while (Date.now() - start < timeoutMs) {
-        try {
-            const stat = await getStatus(targetIp, targetPort);
-            process.stdout.write(`  ${fmt()} | voteStatus=${stat.voteStatus} | unl=${stat.currentUnl.length}\r`);
-            if (stat.voteStatus === 'synced' && (!expectedUnlCount || stat.currentUnl.length === expectedUnlCount)) {
-                console.log(`\n  ✓ Synced! UNL=${stat.currentUnl.length}`);
-                return stat;
-            }
-        } catch(e) { process.stdout.write(`  ${fmt()} | waiting... (${e.message})\r`); }
-        await sleep(3000);
-    }
-    throw new Error('Timed out waiting for sync');
-};
-
 const submitInput = async (targetIp, targetPort, msg) => {
     const HP = require('hotpocket-js-client');
     const keyPair = await getKeyPair();
@@ -219,7 +201,6 @@ const findHostsViaAPI = async (apiUrl, minSlots, targetCount, minRep, includeUns
         '&minRep=' + (minRep || 200) +
         (includeUnscored ? '&includeUnscored=true' : '') +
         '&minXah=1&minEvr=0.01' +
-        '&minLastHeartbeat=180' +
         '&minLastHeartbeat=180' +
         '&sortBy=hostReputation&sortDir=desc' +
         '&limit=' + (targetCount * 10);
@@ -407,7 +388,7 @@ const findHosts = async (minSlots = 1, targetCount = 20, minRep = 200, includeUn
         batchNum++;
         process.stdout.write('  Batch ' + String(batchNum).padStart(2) + ' | Checked: ' + checked.size + '/' + MAX_SCAN + ' | Found: ' + found.length + '/' + targetCount + '\r');
 
-        const tmpFile='/tmp/ecm-hosts-batch.txt';
+        const tmpFile=require('path').join(require('os').tmpdir(),'ecm-hosts-batch.txt');
         fs.writeFileSync(tmpFile, batch.join('\n'));
         const result=spawnSync('evdevkit',['hostinfo','-f',tmpFile],{encoding:'utf8',timeout:60000});
         try{fs.unlinkSync(tmpFile);}catch{}
@@ -471,7 +452,7 @@ const findHosts = async (minSlots = 1, targetCount = 20, minRep = 200, includeUn
         (h.sashimonoVersion||'?')
     ));
     console.log('  '+hr(131));
-    console.log('\n  ' + found.length + ' host(s) verified — active, funded and reputation >= ' + MIN_REP + '.\n  Tip: Results filtered to exactly 1 available slot per host to avoid evdevkit chunk-size bug.\n');
+    console.log('\n  ' + found.length + ' host(s) verified — active, funded and reputation >= ' + MIN_REP + '.\n');
     return found;
 };
 
@@ -492,7 +473,7 @@ const setupGlobalCredentials = async () => {
     } else {
         console.log('  Generating new key pair...');
         try {
-            const out = execSync('evdevkit keygen 2>&1', { encoding: 'utf8' });
+            const out = execSync('evdevkit keygen', { encoding: 'utf8', stderr: 'pipe' });
             console.log(out);
             userPrivKey = (out.match(/private[Kk]ey['":\s]+(ed[a-f0-9]{128})/i)||[])[1]||'';
             userPubKey  = (out.match(/public[Kk]ey['":\s]+(ed[a-f0-9]{64})/i)||[])[1]||'';
@@ -576,7 +557,6 @@ HP_PEER_DISCOVERY=${peerDiscovery}
 CONTRACT_VERSION=${contractVersion}
 ALERT_HOURS=6
 ALERT_MIN_MOMENTS=12
-HOST_API_URL=https://api.onledger.net
 `, { mode: 0o600 });
 
     // Write hp-init.cfg
@@ -748,7 +728,7 @@ const opDeploy = async () => {
     fs.writeFileSync(path.join(CONTRACT_DIR,'authorized_pubkey.txt'), process.env.EV_USER_PUBLIC_KEY+'\n');
     console.log(`      ✓ ${process.env.EV_USER_PUBLIC_KEY}`);
 
-    const hostsFile='/tmp/ecm-deploy-hosts.txt';
+    const hostsFile=require('path').join(require('os').tmpdir(),'ecm-deploy-hosts.txt');
     fs.writeFileSync(hostsFile, hostAddrs.join('\n'));
 
     console.log('[3/3] Running evdevkit cluster-create...\n');
@@ -829,7 +809,7 @@ const opStatus = async () => {
         console.log(`  Contract ID      : ${contractId}`);
         console.log(`  Contract Version : ${contractVersion}`);
         console.log(`  HP Version       : ${stat.hpVersion}`);
-        console.log(`  Vote Status      : ${stat.voteStatus}`);
+        console.log(`  Vote Status      : ${stat.voteStatus}${stat.weaklyConnected ? '  ⚠  WEAKLY CONNECTED' : ''}`);
         console.log(`  LCL              : ${stat.ledgerSeqNo}`);
         console.log(`  Round Time       : ${stat.roundTime}ms`);
         console.log(`  UNL Count        : ${stat.currentUnl.length}`);
@@ -862,20 +842,31 @@ const opStatus = async () => {
                         const roundtime = parseInt(process.env.HP_ROUNDTIME || 5000);
                         console.log(`\n  Waiting ${(roundtime * 2 / 1000).toFixed(1)}s for new node to stabilise...`);
                         await sleep(roundtime * 2);
-                        // Step 3 — Remove dead node
-                        console.log(`  Removing unreachable node ${deadPubkey.slice(0,20)}…`);
-                        try {
-                            const nodeInfo = nodes.find(n => n.pubkey === deadPubkey);
-                            await submitInput(ip, port, { type: 'removeNode', pubkey: deadPubkey, ip: nodeInfo?.domain, peerPort: nodeInfo?.peerPort });
+                        // Step 3 — Check if dead node already left UNL
+                        const currentStat = await getStatus(ip, port);
+                        if (!currentStat.currentUnl.includes(deadPubkey)) {
+                            console.log(`  ✓ Dead node already left the UNL — no removal needed.`);
                             saveNodes(loadNodes().filter(n => n.pubkey !== deadPubkey));
-                            const expectedUnl = stat.currentUnl.length;
-                            await pollUntil(async () => {
-                                const s = await getStatus(ip, port);
-                                process.stdout.write(`  UNL: ${s.currentUnl.length}/${expectedUnl} | voteStatus: ${s.voteStatus}\r`);
-                                return s.currentUnl.length === expectedUnl && s.voteStatus === 'synced' ? s : null;
-                            }, roundtime * 20);
-                            console.log(`\n  ✓ Cluster repaired. UNL=${stat.currentUnl.length}`);
-                        } catch(e) { console.error(`  ✗ Failed to remove dead node: ${e.message}`); }
+                        } else {
+                            const doRemove = (await ask(`  Remove dead node ${deadPubkey.slice(0,20)}… now? (yes/y or Enter to skip): `)).trim();
+                            if (doRemove === 'yes' || doRemove === 'y') {
+                                console.log(`  Removing unreachable node ${deadPubkey.slice(0,20)}…`);
+                                try {
+                                    const nodeInfo = nodes.find(n => n.pubkey === deadPubkey);
+                                    await submitInput(ip, port, { type: 'removeNode', pubkey: deadPubkey, ip: nodeInfo?.domain, peerPort: nodeInfo?.peerPort });
+                                    saveNodes(loadNodes().filter(n => n.pubkey !== deadPubkey));
+                                    const expectedUnl = stat.currentUnl.length;
+                                    await pollUntil(async () => {
+                                        const s = await getStatus(ip, port);
+                                        process.stdout.write(`  UNL: ${s.currentUnl.length}/${expectedUnl} | voteStatus: ${s.voteStatus}\r`);
+                                        return s.currentUnl.length === expectedUnl && s.voteStatus === 'synced' ? s : null;
+                                    }, roundtime * 20);
+                                    console.log(`\n  ✓ Cluster repaired. UNL=${expectedUnl}`);
+                                } catch(e) { console.error(`  ✗ Failed to remove dead node: ${e.message}`); }
+                            } else {
+                                console.log('  Skipped — remove manually via option 4.');
+                            }
+                        }
                     }
                 }
             }
@@ -904,7 +895,7 @@ const opUpdateContract = async () => {
         let src = fs.readFileSync(srcIndex, 'utf8');
         src = src.replace(/const VERSION\s*=\s*'[^']+'/,  `const VERSION   = '${newVersion}'`);
         fs.writeFileSync(srcIndex, src);
-        execSync(`cd ${path.join(TOOL_DIR, 'contract')} && npm run build`, { encoding: 'utf8' });
+        execSync('npm run build', { encoding: 'utf8', cwd: path.join(TOOL_DIR, 'contract') });
         console.log(`  ✓ Rebuilt contract at ${newVersion}`);
     }
 
