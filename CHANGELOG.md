@@ -106,3 +106,8 @@
 
 - **Confirmation before remove** — auto-repair now asks before removing the dead node rather than doing it automatically
 - **Dead node UNL check** — checks if dead node already left the UNL naturally before attempting removal, avoiding unnecessary `removeNode` calls
+
+### Heartbeat quality filter (v3.0.0 continued)
+
+- **3-bucket heartbeat validation** — host finder now requires hosts to have sent a heartbeat in each of the last 3 hourly windows, not just any single heartbeat within 3 hours. This ensures hosts are consistently active rather than having sent one heartbeat and gone quiet.
+- **4,511 qualifying hosts** — down from ~5,400 with single-heartbeat filter, excluding ~900 hosts with gaps in their heartbeat pattern.
