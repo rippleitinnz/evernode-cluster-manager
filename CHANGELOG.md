@@ -70,8 +70,3 @@
 
 - **Absolute path fallbacks** — `ws` and `evernode-js-client` now try local `node_modules` first, falling back to evdevkit global path. Works on both standard Linux installs and systems without global evdevkit.
 - **Optional dependencies** — added `ws` and `evernode-js-client` as `optionalDependencies` in `client/package.json` for systems that need local installs.
-
-### Cross-platform compatibility (v3.0.0)
-
-- **Absolute path fallbacks** — `ws` and `evernode-js-client` now try local `node_modules` first, falling back to evdevkit global path. Works on both standard Linux installs and systems without global evdevkit.
-- **Optional dependencies** — added `ws` and `evernode-js-client` as `optionalDependencies` in `client/package.json` for systems that need local installs.
