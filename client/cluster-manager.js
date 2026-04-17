@@ -219,6 +219,7 @@ const findHostsViaAPI = async (apiUrl, minSlots, targetCount, minRep, includeUns
         '&minRep=' + (minRep || 200) +
         (includeUnscored ? '&includeUnscored=true' : '') +
         '&minXah=1&minEvr=0.01' +
+        '&minLastHeartbeat=60' +
         '&sortBy=hostReputation&sortDir=desc' +
         '&limit=' + (targetCount * 10);
 

@@ -77,3 +77,9 @@
 - **Removed all bash dependencies** — replaced all `bash -c 'set -a; source ...'` calls with direct `execSync` using `process.env`. No bash required on any platform.
 - **Platform-aware sudo** — added `const sudo` helper that uses `sudo -E` on Linux/Mac and empty string on Windows.
 - **All env vars loaded via `loadProjectEnv()`** — credentials no longer need to be sourced via bash subshell, they are already in `process.env` when needed.
+
+### Host heartbeat filter (v3.0.0)
+
+- **`lastHeartbeatTime` field** — added to host discovery API, populated only when a real heartbeat is received (not during full scans)
+- **`minLastHeartbeat` filter** — new API parameter filters hosts by minutes since last heartbeat. Default in cluster manager: 60 minutes
+- **Host finder** — now only returns hosts that have sent a heartbeat in the last 60 minutes, reducing chances of acquiring an unresponsive host
