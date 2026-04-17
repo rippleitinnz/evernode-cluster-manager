@@ -286,7 +286,7 @@ const findHosts = async (minSlots = 1, targetCount = 20, minRep = 200, includeUn
         console.log('\n  Using host API: ' + apiUrl);
         return await findHostsViaAPI(apiUrl, minSlots, targetCount, minRep, includeUnscored, allowReport);
     } catch(e) {
-        console.log('  ⚠ API unavailable (' + e.message + ')');
+        console.log('  ⚠  API unavailable (' + e.message + ')');
         return [];
     }
 
@@ -481,7 +481,7 @@ const verifyHosts = async (hostAddrs, requiredSlots = 1) => {
         }
         return { allOk, results };
     } catch(e) {
-        console.error('  ⚠ Could not verify hosts: ' + e.message);
+        console.error('  ⚠  Could not verify hosts: ' + e.message);
         return { allOk: null, results: [] }; // null = verification failed, proceed with caution
     }
 };
@@ -589,7 +589,7 @@ const opDeploy = async () => {
     console.log('\n  Parsing cluster output...');
     const nodes = parseEvmOutput(clusterOutput);
     if (!Array.isArray(nodes) || nodes.length === 0) {
-        console.log('  ⚠ Could not auto-parse output. Please enter details manually.');
+        console.log('  ⚠  Could not auto-parse output. Please enter details manually.');
         contractId = (await ask('  Contract ID: ')).trim();
         ip         = (await ask('  Node IP/domain: ')).trim();
         port       = (await ask('  Node user port: ')).trim();
@@ -663,7 +663,7 @@ const opStatus = async () => {
                 return !peerDomains.some(p => domain.includes(p) || p.includes(domain));
             });
             if (unreachable.length > 0) {
-                console.log('\n  ⚠ Unreachable node(s) detected:');
+                console.log('\n  ⚠  Unreachable node(s) detected:');
                 unreachable.forEach(pk => {
                     const n = nodes.find(n => n.pubkey === pk);
                     console.log(`    ${pk.slice(0,20)}… ${n ? n.domain : 'unknown'}`);
@@ -891,7 +891,7 @@ const opRemoveNode = async () => {
             try {
                 await submitInput(ip, port, { type: 'removePeer', peerIp, peerPort: parseInt(peerPort) });
                 console.log(`  ✓ Peer removed: ${peerIp}:${peerPort}`);
-            } catch(e) { console.log(`  ⚠ Peer removal failed: ${e.message}`); }
+            } catch(e) { console.log(`  ⚠  Peer removal failed: ${e.message}`); }
         }
     } catch(e) { console.error(`\n  ✗ Remove failed: ${e.message}`); }
     console.log('─────────────────────────────────────────────────────\n');
@@ -910,7 +910,7 @@ const opCheckExpiry = async () => {
     console.log('  '+hr(90));
     console.log('  '+'Pubkey'.padEnd(22)+'Domain'.padEnd(25)+'Purchased'.padEnd(11)+'Remaining'.padEnd(12)+'Expires (UTC)');
     console.log('  '+hr(90));
-    nodes.forEach(n=>{ const tr=timeRemaining(n); console.log('  '+(n.pubkey.slice(0,20)+'…').padEnd(22)+(n.domain||'').slice(0,23).padEnd(25)+(n.lifeMoments+'h total').padEnd(11)+(tr.expired?'⚠ EXPIRED':tr.text).padEnd(12)+new Date(tr.expirySec*1000).toUTCString()); });
+    nodes.forEach(n=>{ const tr=timeRemaining(n); console.log('  '+(n.pubkey.slice(0,20)+'…').padEnd(22)+(n.domain||'').slice(0,23).padEnd(25)+(n.lifeMoments+'h total').padEnd(11)+(tr.expired?'⚠  EXPIRED':tr.text).padEnd(12)+new Date(tr.expirySec*1000).toUTCString()); });
     console.log('  '+hr(90));
     console.log('─────────────────────────────────────────────────────\n');
 };
