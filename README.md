@@ -149,6 +149,8 @@ XAHAU_WS=wss://xahau.network
 
 Without HOST_API_URL set, the tool falls back to scanning the Evernode network directly which takes 2-3 minutes.
 
+New projects default to `HOST_API_URL=https://api.onledger.net` automatically — no configuration required for most users.
+
 ## Important Notes
 
 - The .env files contain private keys — never commit them to git (gitignored by default)
