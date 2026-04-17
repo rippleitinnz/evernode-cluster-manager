@@ -172,6 +172,19 @@ HOST_API_URL=http://your-api:3001
 
 `XAHAU_WS` is not used for host discovery — it connects to the Evernode registry to verify a specific host's slot availability before committing a lease payment.
 
+## Known Issue — evdevkit cluster-create Bug
+
+> [!WARNING]
+> There is a known bug in `evdevkit cluster-create` where the chunk-size allocation algorithm can place two nodes on the same host instead of one node per host. This only affects initial cluster deployment.
+>
+> When two nodes end up on the same host, they cannot peer with each other due to hairpin NAT — the containers cannot route traffic back to each other via the host's external IP. This results in `⚠  WEAKLY CONNECTED` and only one peer showing in the cluster status.
+>
+> **Workaround:** The host finder always returns at least 10 single-slot hosts at the top of the list, clearly labelled as recommended for deployment. With only 1 slot available, `evdevkit` cannot place a second node on that host and is forced to use a different host for each node.
+
+## Input Validation
+
+All yes/no prompts require `yes`, `y`, or Enter to skip. Any other input will re-prompt with a reminder. This prevents accidental actions from mistyped input.
+
 ## Important Notes
 
 - The `.env` files contain private keys — never commit them to git (gitignored by default)
