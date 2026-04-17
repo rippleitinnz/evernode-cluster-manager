@@ -17,9 +17,14 @@ A single tool for deploying and managing multiple HotPocket smart contract clust
 ## Requirements
 
 - Node.js v20+
-- evdevkit installed globally: npm i evdevkit -g
+- evdevkit installed globally: `npm i evdevkit -g`
 - An XRPL/Xahau wallet funded with XAH and EVR tokens (tenant account)
 - Optional: A local Evernode Host Discovery API (see api.onledger.net for reference)
+
+> **Note:** The tool will attempt to use locally installed `ws` and `evernode-js-client` packages first, falling back to the evdevkit global installation. If you encounter module not found errors, run `npm install` in the `client/` directory:
+> ```bash
+> cd client && npm install
+> ```
 
 ## Quick Start
 
