@@ -81,7 +81,7 @@ Select a node by index or all to extend all nodes. Specify how many additional m
 
 Queries the local Host Discovery API (or falls back to network scan) for active hosts. Results are deduplicated by operator — maximum 3 hosts per operator — so no single operator dominates the list. Default filters: `active=true`, `minRep=200`, `minXah=1`, `minEvr=0.01`, plus a 3-bucket heartbeat check (see below).
 
-After viewing results you can report a broken host by entering `r<number>` (e.g. `r3`) or the full host address. Reported hosts are excluded from searches for 7 days.
+After viewing results you can report a broken host by entering the full host XRPL address. Always use the complete address — many hosts share similar prefixes. Reported hosts are excluded from searches for 7 days.
 
 ### Option 8 — Read Node Log
 
@@ -145,7 +145,7 @@ evernode-cluster-manager/
 
 **Cluster health:** If a node becomes unreachable, `Vote Status` shows `⚠ WEAKLY CONNECTED`. The tool identifies the unreachable node by comparing the UNL against the connected peer list and offers to replace it automatically.
 
-**Reporting bad hosts:** After finding hosts (option 7), enter `r<number>` to report a host that failed to accept a contract or has closed ports. Reported hosts are excluded from future searches for 7 days via the Host Discovery API.
+**Reporting bad hosts:** After finding hosts (option 7), enter the full host XRPL address to report a host that failed to accept a contract or has closed ports. Always use the full address — many hosts share similar prefixes. Reported hosts are excluded from future searches for 7 days via the Host Discovery API.
 
 ## Host Discovery API
 

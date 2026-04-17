@@ -1141,19 +1141,10 @@ const opFindHosts = async () => {
     const hosts = await findHosts(minSlots, target, minRep, unscored==='yes'||unscored==='y', true);
     if (!hosts || !hosts.length) return;
     while (true) {
-        const input = (await ask('  Report a host? (r<number> e.g. r3, or Enter to skip): ')).trim();
+        const input = (await ask('  Report a host? (enter full host address or Enter to skip): ')).trim();
         if (!input) break;
-        const match = input.match(/^r(\d+)$/i);
-        let host;
-        if (match) {
-            const idx = parseInt(match[1]) - 1;
-            if (idx < 0 || idx >= hosts.length) { console.log('  Invalid index.'); continue; }
-            host = hosts[idx];
-        } else {
-            // Try full address match
-            host = hosts.find(h => h.address === input);
-            if (!host) { console.log('  Invalid — use r<number> e.g. r3, or full address'); continue; }
-        }
+        const host = hosts.find(h => h.address === input);
+        if (!host) { console.log('  Host address not found in current results — enter the full address exactly as shown.'); continue; }
         await reportHost(host.address, host.domain);
     }
 };
