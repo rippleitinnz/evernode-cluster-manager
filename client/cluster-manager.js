@@ -48,6 +48,14 @@ const ask = (q) => new Promise(resolve => rl.question(q, resolve));
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const hr = (n=52) => '─'.repeat(n);
 const sudo = process.platform !== 'win32' ? 'sudo -E ' : '';
+const isYes = (s) => s === 'yes' || s === 'y';
+const askYesNo = async (q) => {
+    while (true) {
+        const s = (await ask(q)).trim().toLowerCase();
+        if (s === 'yes' || s === 'y' || s === '') return s;
+        console.log('  Please enter yes/y or press Enter to skip.');
+    }
+};
 
 // ── Global env ────────────────────────────────────────────────
 
@@ -196,85 +204,93 @@ const parseEvmOutput = (raw) => {
 };
 
 // ── Fast host finder via local API ───────────────────────────
+const fetchFromAPI = (url) => new Promise((resolve, reject) => {
+    const mod = url.startsWith('https') ? require('https') : require('http');
+    mod.get(url, (res) => {
+        let d = '';
+        res.on('data', c => d += c);
+        res.on('end', () => { try { resolve(JSON.parse(d)); } catch(e) { reject(e); } });
+    }).on('error', reject);
+});
+
+const getOperator = (domain) => {
+    if (!domain) return 'unknown';
+    const stripped = domain.replace(/^[a-z0-9]+-?\d*\./, '');
+    const parts = stripped.split('.');
+    const base = parts[0].replace(/\d+(-\d+)?$/, '').replace(/-$/, '');
+    return base || parts.slice(-2).join('.');
+};
+
+const dedupeByOperator = (hosts, domainCount = {}, max = 3) => hosts.filter(h => {
+    const op = getOperator(h.domain || '');
+    domainCount[op] = (domainCount[op] || 0) + 1;
+    return domainCount[op] <= max;
+});
+
 const findHostsViaAPI = async (apiUrl, minSlots, targetCount, minRep, includeUnscored, allowReport = false) => {
-    const url = apiUrl.replace(/\/$/, '') +
-        '/hosts?active=true' +
-        '&minSlots=' + minSlots +
+    const base = apiUrl.replace(/\/$/, '') + '/hosts?active=true' +
         '&minRep=' + (minRep || 200) +
         (includeUnscored ? '&includeUnscored=true' : '') +
         '&minXah=1&minEvr=0.01' +
         '&minLastHeartbeat=180' +
-        '&sortBy=hostReputation&sortDir=desc' +
-        '&limit=' + (targetCount * 10);
+        '&sortBy=hostReputation&sortDir=desc';
 
-    return new Promise((resolve, reject) => {
-        const mod = url.startsWith('https') ? require('https') : require('http');
-        mod.get(url, (res) => {
-            let d = '';
-            res.on('data', c => d += c);
-            res.on('end', () => {
-                try {
-                    const data = JSON.parse(d);
-                    if (!data.success) { reject(new Error(data.error || 'API error')); return; }
+    // Fetch single-slot and general hosts in parallel
+    const [singleData, allData] = await Promise.all([
+        fetchFromAPI(base + '&minSlots=1&maxSlots=1&limit=50'),
+        fetchFromAPI(base + '&minSlots=' + minSlots + '&limit=' + (targetCount * 10))
+    ]);
 
-                    // Deduplicate by operator — max 3 per operator for diversity
-                    const domainCount = {};
-                    const getOperator = (domain) => {
-                        if (!domain) return 'unknown';
-                        // Strip leading node numbers e.g. n1234.bisdaknode1051-1100.ovh -> bisdaknode
-                        const stripped = domain.replace(/^[a-z0-9]+-?\d*\./, '');
-                        // Extract meaningful operator name from subdomain
-                        const parts = stripped.split('.');
-                        // Use first subdomain part, strip trailing numbers
-                        const base = parts[0].replace(/\d+(-\d+)?$/, '').replace(/-$/, '');
-                        return base || parts.slice(-2).join('.');
-                    };
-                    const hosts = data.hosts.filter(h => {
-                        const operator = getOperator(h.domain || '');
-                        domainCount[operator] = (domainCount[operator] || 0) + 1;
-                        return domainCount[operator] <= 3;
-                    }).slice(0, targetCount);
-                    // Fetch cache age
-                    const ageMs = hosts.length > 0 ? Date.now() - hosts[0].lastUpdated : 0;
-                    const ageMin = Math.round(ageMs / 60000);
-                    const ageTxt = ageMin < 1 ? 'just now' : ageMin + ' min ago';
-                    console.log('\n  API returned ' + hosts.length + ' hosts (from ' + data.total + ' matching) | cache updated: ' + ageTxt);
+    if (!allData.success) throw new Error(allData.error || 'API error');
 
-                    // Display results
-                    const fmtEVR = (drops) => {
-                        if (!drops) return 'free?';
-                        const e = drops / 1000000;
-                        if (e < 0.001) return drops + 'drops';
-                        if (e < 1) return e.toFixed(4) + ' EVR';
-                        return e.toFixed(2) + ' EVR';
-                    };
-                    const fmtRep = (r) => r === null || r === undefined ? '?' : String(r);
+    // Dedupe single-slot hosts first (up to 10)
+    const domainCount = {};
+    const singleHosts = dedupeByOperator(singleData.success ? singleData.hosts : [], domainCount).slice(0, 10);
+    const singleSet = new Set(singleHosts.map(h => h.address));
 
-                    console.log('  ' + hr(131));
-                    console.log('  ' + '#'.padEnd(4) + 'Address'.padEnd(36) + 'Domain'.padEnd(25) + 'CC'.padEnd(5) + 'Avail'.padEnd(7) + 'Total'.padEnd(7) + 'Rep'.padEnd(6) + 'RAM'.padEnd(8) + 'Lease/hr'.padEnd(12) + 'Version');
-                    console.log('  ' + hr(131));
-                    hosts.forEach((h, i) => console.log(
-                        '  ' + String(i + 1).padEnd(4) +
-                        (h.address || '').padEnd(36) +
-                        (h.domain || '').slice(0, 23).padEnd(25) +
-                        (h.countryCode || '??').padEnd(5) +
-                        String(h.availableInstances || 0).padEnd(7) +
-                        String(h.maxInstances || 0).padEnd(7) +
-                        fmtRep(h.hostReputation).padEnd(6) +
-                        (h.ramMb ? Math.round(h.ramMb / 1024) + 'GB' : '?').padEnd(8) +
-                        fmtEVR(h.leaseDrops).padEnd(12) +
-                        (h.version || '?')
-                    ));
-                    console.log('  ' + hr(131));
-                    console.log('\n  ' + hosts.length + ' host(s) from local API cache.');
-                    if (allowReport) console.log('  Tip: To report a bad host, enter r<number> (e.g. r3)');
-                    console.log('');
+    // Fill remainder from general pool skipping already included
+    const otherHosts = dedupeByOperator(
+        allData.hosts.filter(h => !singleSet.has(h.address)),
+        domainCount
+    ).slice(0, targetCount - singleHosts.length);
 
-                    resolve(hosts);
-                } catch(e) { reject(e); }
-            });
-        }).on('error', reject);
-    });
+    const hosts = [...singleHosts, ...otherHosts];
+
+    const ageMs = hosts.length > 0 ? Date.now() - hosts[0].lastUpdated : 0;
+    const ageMin = Math.round(ageMs / 60000);
+    const ageTxt = ageMin < 1 ? 'just now' : ageMin + ' min ago';
+    console.log('\n  API returned ' + hosts.length + ' hosts (' + singleHosts.length + ' single-slot) | cache updated: ' + ageTxt);
+
+    const fmtEVR = (drops) => {
+        if (!drops) return 'free?';
+        const e = drops / 1000000;
+        if (e < 0.001) return drops + 'drops';
+        if (e < 1) return e.toFixed(4) + ' EVR';
+        return e.toFixed(2) + ' EVR';
+    };
+    const fmtRep = (r) => r === null || r === undefined ? '?' : String(r);
+
+    console.log('  ' + hr(131));
+    console.log('  ' + '#'.padEnd(4) + 'Address'.padEnd(36) + 'Domain'.padEnd(25) + 'CC'.padEnd(5) + 'Avail'.padEnd(7) + 'Total'.padEnd(7) + 'Rep'.padEnd(6) + 'RAM'.padEnd(8) + 'Lease/hr'.padEnd(12) + 'Version');
+    console.log('  ' + hr(131));
+    hosts.forEach((h, i) => console.log(
+        '  ' + String(i + 1).padEnd(4) +
+        (h.address || '').padEnd(36) +
+        (h.domain || '').slice(0, 23).padEnd(25) +
+        (h.countryCode || '??').padEnd(5) +
+        String(h.availableInstances || 0).padEnd(7) +
+        String(h.maxInstances || 0).padEnd(7) +
+        fmtRep(h.hostReputation).padEnd(6) +
+        (h.ramMb ? Math.round(h.ramMb / 1024) + 'GB' : '?').padEnd(8) +
+        fmtEVR(h.leaseDrops).padEnd(12) +
+        (h.version || '?')
+    ));
+    console.log('  ' + hr(131));
+    console.log('\n  ' + hosts.length + ' host(s) — ' + singleHosts.length + ' single-slot (recommended for deployment).');
+    if (allowReport) console.log('  To report a bad host enter its full XRPL address.');
+    console.log('');
+
+    return hosts;
 };
 
 
@@ -302,9 +318,9 @@ const setupGlobalCredentials = async () => {
 
     // Keys
     console.log('── Key Generation ────────────────────────────────────');
-    const hasKeys = (await ask('  Have existing HotPocket user keys? (yes/y or Enter to generate): ')).trim();
+    const hasKeys = (await askYesNo('  Have existing HotPocket user keys? (yes/y or Enter to generate): '));
     let userPrivKey='', userPubKey='';
-    if (hasKeys==='yes'||hasKeys==='y') {
+    if (isYes(hasKeys)) {
         userPrivKey = (await ask('  EV_USER_PRIVATE_KEY: ')).trim();
         userPubKey  = (await ask('  EV_USER_PUBLIC_KEY : ')).trim();
     } else {
@@ -377,6 +393,8 @@ const createProject = async () => {
                 contractSrcDir = customPath; break;
             }
             console.log('  Directory not found. Try again.');
+        } else {
+            console.log('  Invalid choice — enter 1 or 2.');
         }
     }
 
@@ -491,8 +509,8 @@ const verifyHosts = async (hostAddrs, requiredSlots = 1) => {
 const opDeploy = async () => {
     console.log('\n── Deploy New Cluster ───────────────────────────────');
 
-    const findFirst = (await ask('  Find available hosts first? (yes/y or Enter to skip): ')).trim();
-    if (findFirst==='yes'||findFirst==='y') {
+    const findFirst = (await askYesNo('  Find available hosts first? (yes/y or Enter to skip): '));
+    if (isYes(findFirst)) {
         const minSlots = parseInt((await ask('  Minimum available slots (default 1): ')).trim()||'1');
         await findHosts(minSlots, 20);
         await ask('  Press Enter to continue...');
@@ -525,7 +543,7 @@ const opDeploy = async () => {
     console.log('  Hosts   :');
     hostAddrs.forEach((h,i)=>console.log(`    ${i+1}. ${h}`));
     console.log('');
-    const confirm=(await ask('  Proceed? (yes/y): ')).trim();
+    const confirm=(await askYesNo('  Proceed? (yes/y or Enter to cancel): '));
     if (confirm!=='yes'&&confirm!=='y') { console.log('  Cancelled.'); return false; }
 
     // Verify hosts are still available before committing
@@ -546,11 +564,11 @@ const opDeploy = async () => {
         console.log('');
         const recheck = await verifyHosts(hostAddrs, 1);
         if (recheck.allOk === false) {
-            const proceed = (await ask('  Some replacement hosts are still unavailable. Proceed anyway? (yes/y or Enter to cancel): ')).trim();
+            const proceed = (await askYesNo('  Some replacement hosts are still unavailable. Proceed anyway? (yes/y or Enter to cancel): '));
             if (proceed !== 'yes' && proceed !== 'y') { console.log('  Cancelled.'); return false; }
         }
     } else if (allOk === null) {
-        const proceed = (await ask('  Could not verify hosts. Proceed anyway? (yes/y or Enter to cancel): ')).trim();
+        const proceed = (await askYesNo('  Could not verify hosts. Proceed anyway? (yes/y or Enter to cancel): '));
         if (proceed !== 'yes' && proceed !== 'y') { console.log('  Cancelled.'); return false; }
     }
 
@@ -668,7 +686,7 @@ const opStatus = async () => {
                     const n = nodes.find(n => n.pubkey === pk);
                     console.log(`    ${pk.slice(0,20)}… ${n ? n.domain : 'unknown'}`);
                 });
-                const replace = (await ask('\n  Replace unreachable node(s) now? (yes/y or Enter to skip): ')).trim();
+                const replace = (await askYesNo('\n  Replace unreachable node(s) now? (yes/y or Enter to skip): '));
                 if (replace === 'yes' || replace === 'y') {
                     for (const deadPubkey of unreachable) {
                         const deadNode = nodes.find(n => n.pubkey === deadPubkey);
@@ -685,7 +703,7 @@ const opStatus = async () => {
                             console.log(`  ✓ Dead node already left the UNL — no removal needed.`);
                             saveNodes(loadNodes().filter(n => n.pubkey !== deadPubkey));
                         } else {
-                            const doRemove = (await ask(`  Remove dead node ${deadPubkey.slice(0,20)}… now? (yes/y or Enter to skip): `)).trim();
+                            const doRemove = (await askYesNo(`  Remove dead node ${deadPubkey.slice(0,20)}… now? (yes/y or Enter to skip): `));
                             if (doRemove === 'yes' || doRemove === 'y') {
                                 console.log(`  Removing unreachable node ${deadPubkey.slice(0,20)}…`);
                                 try {
@@ -773,8 +791,8 @@ const opAddNode = async () => {
         console.log(`  ✓ Synced. UNL=${stat.currentUnl.length}`);
     } catch(e) { console.error(`  ✗ ${e.message}`); return; }
 
-    const findFirst=(await ask('\n  Find available hosts first? (yes/y or Enter to skip): ')).trim();
-    if (findFirst==='yes'||findFirst==='y') { await findHosts(1,20); await ask('  Press Enter to continue...'); }
+    const findFirst=(await askYesNo('\n  Find available hosts first? (yes/y or Enter to skip): '));
+    if (isYes(findFirst)) { await findHosts(1,20); await ask('  Press Enter to continue...'); }
 
     console.log('\n  ── STEP 1: Acquire ───────────────────────────────');
     const extHost=(await ask('  External host XRPL address: ')).trim();
@@ -783,7 +801,7 @@ const opAddNode = async () => {
 
     const { allOk: hostOk } = await verifyHosts([extHost], 1);
     if (hostOk === false) {
-        const proceed = (await ask('  Host has no available slots. Proceed anyway? (yes/y or Enter to cancel): ')).trim();
+        const proceed = (await askYesNo('  Host has no available slots. Proceed anyway? (yes/y or Enter to cancel): '));
         if (proceed !== 'yes' && proceed !== 'y') { console.log('  Cancelled.'); return; }
     }
 
@@ -868,7 +886,7 @@ const opRemoveNode = async () => {
         if (idx>=0&&idx<stat.currentUnl.length) { targetPubkey=stat.currentUnl[idx]; console.log(`  Selected: ${targetPubkey}`); }
         else { console.error('  ✗ Invalid index.'); return; }
     }
-    const confirm=(await ask(`  Confirm remove ${targetPubkey.slice(0,20)}…? (yes/y): `)).trim();
+    const confirm=(await askYesNo(`  Confirm remove ${targetPubkey.slice(0,20)}…? (yes/y or Enter to cancel): `));
     if (confirm!=='yes'&&confirm!=='y') { console.log('  Cancelled.'); return; }
     try {
         const nodeInfo = loadNodes().find(n => n.pubkey === targetPubkey);
@@ -973,8 +991,8 @@ const opFindHosts = async () => {
     const minSlots=parseInt((await ask('  Minimum available slots (default 1): ')).trim()||'1');
     const target=parseInt((await ask('  Number of hosts to find (default 20): ')).trim()||'20');
     const minRep=parseInt((await ask('  Minimum reputation score (default 200, max 252): ')).trim()||'200');
-    const unscored=(await ask('  Include unscored hosts rep=0? (yes/y or Enter to skip): ')).trim();
-    const hosts = await findHosts(minSlots, target, minRep, unscored==='yes'||unscored==='y', true);
+    const unscored=(await askYesNo('  Include unscored hosts rep=0? (yes/y or Enter to skip): '));
+    const hosts = await findHosts(minSlots, target, minRep, isYes(unscored), true);
     if (!hosts || !hosts.length) return;
     while (true) {
         const input = (await ask('  Report a host? (enter full host address or Enter to skip): ')).trim();
@@ -993,9 +1011,9 @@ const opDeleteProject = async (project) => {
     console.log(`  Project : ${project.name}`);
     if (project.contractId) console.log(`  Contract: ${project.contractId.slice(0,8)}…`);
     console.log('');
-    const confirm = (await ask('  Are you sure you want to delete this project? (yes/y): ')).trim();
+    const confirm = (await askYesNo('  Are you sure you want to delete this project? (yes/y or Enter to cancel): '));
     if (confirm !== 'yes' && confirm !== 'y') { console.log('  Cancelled.'); return; }
-    const delDir = (await ask('  Also delete project directory and all files? (yes/y or Enter to keep): ')).trim();
+    const delDir = (await askYesNo('  Also delete project directory and all files? (yes/y or Enter to keep): '));
     if (delDir === 'yes' || delDir === 'y') {
         fs.rmSync(project.dir, { recursive: true, force: true });
         console.log(`  ✓ Project "${project.name}" and all files deleted.`);
@@ -1009,7 +1027,7 @@ const opDeleteProject = async (project) => {
 const opResetCredentials = async () => {
     console.log('\n── Reset Global Credentials ─────────────────────────');
     console.log('  This will overwrite the shared credentials used by all projects.');
-    const confirm = (await ask('  Proceed? (yes/y): ')).trim();
+    const confirm = (await askYesNo('  Proceed? (yes/y or Enter to cancel): '));
     if (confirm !== 'yes' && confirm !== 'y') { console.log('  Cancelled.'); return; }
     await setupGlobalCredentials();
     console.log('  ✓ Global credentials updated.');
@@ -1105,7 +1123,7 @@ const opReadLog = async () => {
     const logFile = logChoice === '3' ? 'stderr' : 'stdout';
     const linesStr = (await ask('  Lines to fetch (default 50): ')).trim() || '50';
     const lines = parseInt(linesStr) || 50;
-    const tailMode = (await ask('  Auto-refresh every 5s? (yes/y or Enter to skip): ')).trim();
+    const tailMode = (await askYesNo('  Auto-refresh every 5s? (yes/y or Enter to skip): '));
     const doTail = tailMode === 'yes' || tailMode === 'y';
 
     const fetchLog = async () => {
@@ -1145,8 +1163,8 @@ const opReadLog = async () => {
 const managementMenu = async () => {
     if (!contractId||!ip||!port) {
         console.log('\n  No cluster deployed yet for this project.');
-        const deploy=(await ask('  Deploy a new cluster now? (yes/y or Enter to skip): ')).trim();
-        if (deploy==='yes'||deploy==='y') { const ok=await opDeploy(); if (!ok) return; }
+        const deploy=(await askYesNo('  Deploy a new cluster now? (yes/y or Enter to skip): '));
+        if (isYes(deploy)) { const ok=await opDeploy(); if (!ok) return; }
         else { console.log('  Returning to project selector...\n'); return; }
     }
 
@@ -1218,10 +1236,10 @@ const main = async () => {
     while (true) {
         await selectProject();
         const result = await managementMenu();
-        if (result !== 'switch') break;
         ip=null; port=null; contractId=null;
         PROJECT_DIR=null; ENV_FILE=null; NODES_FILE=null; CONTRACT_DIR=null; INITCFG=null;
-        console.log('\n  Switching project...\n');
+        if (result !== 'switch') console.log('\n  Returning to project selector...\n');
+        else console.log('\n  Switching project...\n');
     }
 };
 
