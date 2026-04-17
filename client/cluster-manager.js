@@ -292,7 +292,7 @@ const findHostsViaAPI = async (apiUrl, minSlots, targetCount, minRep, includeUns
 
 // ── Batch XAH + EVR balance check ─────────────────────────────
 const checkBalances = (addresses) => new Promise((resolve) => {
-    const WS = require('/usr/lib/node_modules/evdevkit/node_modules/ws');
+    const WS = (() => { try { return require('ws'); } catch { return require('/usr/lib/node_modules/evdevkit/node_modules/ws'); } })();
     const results = {};
     addresses.forEach(a => { results[a] = { xah: 0, evr: 0 }; });
     if (!addresses.length) { resolve(results); return; }
@@ -332,7 +332,7 @@ const checkReputation = async (addresses) => {
     addresses.forEach(a => { results[a] = null; });
     if (!addresses.length) return results;
     try {
-        const evernode = require('/usr/lib/node_modules/evdevkit/node_modules/evernode-js-client');
+        const evernode = (() => { try { return require('evernode-js-client'); } catch { return require('/usr/lib/node_modules/evdevkit/node_modules/evernode-js-client'); } })();
         await evernode.Defaults.useNetwork('mainnet');
         const xrplApi = new evernode.XrplApi();
         evernode.Defaults.set({ xrplApi, useCentralizedRegistry: true });
@@ -623,7 +623,7 @@ const verifyHosts = async (hostAddrs, requiredSlots = 1) => {
     const xahauWs = process.env.XAHAU_WS || 'wss://xahau.network';
     console.log('\n  Verifying host availability via ' + xahauWs + '...');
     try {
-        const evernode = require('/usr/lib/node_modules/evdevkit/node_modules/evernode-js-client');
+        const evernode = (() => { try { return require('evernode-js-client'); } catch { return require('/usr/lib/node_modules/evdevkit/node_modules/evernode-js-client'); } })();
         await evernode.Defaults.useNetwork('mainnet');
         const xrplApi = new evernode.XrplApi(xahauWs);
         evernode.Defaults.set({ xrplApi, useCentralizedRegistry: true });

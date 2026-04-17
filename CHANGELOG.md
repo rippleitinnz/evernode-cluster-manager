@@ -65,3 +65,13 @@
 
 - **Node expiry display** — renamed `Moments` column to `Purchased` showing `Xh total` to clarify it is the total lease duration, not time remaining
 - **Expiry alert monitor** — added background check every 30 minutes, alerts when nodes with >= 12 purchased moments have less than 6 hours remaining. Configurable via `ALERT_HOURS` and `ALERT_MIN_MOMENTS` in project `.env`
+
+### Cross-platform compatibility (v3.0.0)
+
+- **Absolute path fallbacks** — `ws` and `evernode-js-client` now try local `node_modules` first, falling back to evdevkit global path. Works on both standard Linux installs and systems without global evdevkit.
+- **Optional dependencies** — added `ws` and `evernode-js-client` as `optionalDependencies` in `client/package.json` for systems that need local installs.
+
+### Cross-platform compatibility (v3.0.0)
+
+- **Absolute path fallbacks** — `ws` and `evernode-js-client` now try local `node_modules` first, falling back to evdevkit global path. Works on both standard Linux installs and systems without global evdevkit.
+- **Optional dependencies** — added `ws` and `evernode-js-client` as `optionalDependencies` in `client/package.json` for systems that need local installs.
