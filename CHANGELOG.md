@@ -102,12 +102,25 @@
 - **Confirmation before remove** — auto-repair now asks before removing the dead node rather than doing it automatically
 - **Dead node UNL check** — checks if dead node already left the UNL naturally before attempting removal, avoiding unnecessary `removeNode` calls
 
-### Auto-repair improvements (v3.0.0 continued)
-
-- **Confirmation before remove** — auto-repair now asks before removing the dead node rather than doing it automatically
-- **Dead node UNL check** — checks if dead node already left the UNL naturally before attempting removal, avoiding unnecessary `removeNode` calls
-
 ### Heartbeat quality filter (v3.0.0 continued)
 
 - **3-bucket heartbeat validation** — host finder now requires hosts to have sent a heartbeat in each of the last 3 hourly windows, not just any single heartbeat within 3 hours. This ensures hosts are consistently active rather than having sent one heartbeat and gone quiet.
 - **4,511 qualifying hosts** — down from ~5,400 with single-heartbeat filter, excluding ~900 hosts with gaps in their heartbeat pattern.
+
+### Report a dead host (v3.0.0)
+
+- **`POST /hosts/:address/report`** — new API endpoint to report a broken host. Sets `reported=1` and excludes the host from search results for 7 days.
+- **Report from find hosts** — after viewing host list in option 7, enter the full host XRPL address to report it. Always use the full address — many hosts share similar prefixes.
+- **Auto-expiry** — reported hosts automatically re-appear after 7 days giving operators time to fix their setup.
+- **DB columns added** — `reported`, `reportedAt`, `reportReason` fields added to hosts table.
+
+### Code cleanup (v3.0.0)
+
+- **Duplicate `minLastHeartbeat`** — removed duplicate filter parameter from API URL
+- **Cross-platform temp files** — replaced hardcoded `/tmp/` paths with `os.tmpdir()` for Windows/Mac compatibility
+- **`HOST_API_URL` template** — removed from project `.env` template entirely, inherited from global `.env`
+- **`npm run build` cwd** — replaced `cd && npm run build` with `cwd` option for cross-platform compatibility
+- **Dead code removed** — removed unused `waitForSync` and `fmt` functions
+- **Auto-repair confirmation** — restored UNL check and confirmation prompt before removing dead node
+- **Report host** — changed from index-based (`r3`) to full address only for safety
+- **`weaklyConnected` display** — added spacing around warning indicator in status output
