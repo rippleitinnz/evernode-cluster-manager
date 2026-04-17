@@ -219,7 +219,7 @@ const findHostsViaAPI = async (apiUrl, minSlots, targetCount, minRep, includeUns
         '&minRep=' + (minRep || 200) +
         (includeUnscored ? '&includeUnscored=true' : '') +
         '&minXah=1&minEvr=0.01' +
-        '&minLastHeartbeat=60' +
+        '&minLastHeartbeat=180' +
         '&sortBy=hostReputation&sortDir=desc' +
         '&limit=' + (targetCount * 10);
 
@@ -571,6 +571,9 @@ HP_THRESHOLD=${threshold}
 HP_LOG_LEVEL=${logLevel}
 HP_PEER_DISCOVERY=${peerDiscovery}
 CONTRACT_VERSION=${contractVersion}
+ALERT_HOURS=6
+ALERT_MIN_MOMENTS=12
+HOST_API_URL=https://api.onledger.net
 `, { mode: 0o600 });
 
     // Write hp-init.cfg

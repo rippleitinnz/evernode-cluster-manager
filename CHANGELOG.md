@@ -83,3 +83,9 @@
 - **`lastHeartbeatTime` field** — added to host discovery API, populated only when a real heartbeat is received (not during full scans)
 - **`minLastHeartbeat` filter** — new API parameter filters hosts by minutes since last heartbeat. Default in cluster manager: 60 minutes
 - **Host finder** — now only returns hosts that have sent a heartbeat in the last 60 minutes, reducing chances of acquiring an unresponsive host
+
+### Host discovery improvements (v3.0.0 continued)
+
+- **Heartbeat filter** — host finder now only returns hosts that have sent a heartbeat in the last 3 moments (180 minutes). Filters out stale/inactive hosts that may have good reputation scores but are no longer actively running.
+- **Public API default** — new projects now default to `HOST_API_URL=https://api.onledger.net` so users who clone the repo get fast cached host lookups out of the box without any additional configuration.
+- **`ALERT_HOURS` and `ALERT_MIN_MOMENTS`** — now included in default project `.env` template.
