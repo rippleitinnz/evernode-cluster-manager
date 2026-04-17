@@ -89,3 +89,10 @@
 - **Heartbeat filter** — host finder now only returns hosts that have sent a heartbeat in the last 3 moments (180 minutes). Filters out stale/inactive hosts that may have good reputation scores but are no longer actively running.
 - **Public API default** — new projects now default to `HOST_API_URL=https://api.onledger.net` so users who clone the repo get fast cached host lookups out of the box without any additional configuration.
 - **`ALERT_HOURS` and `ALERT_MIN_MOMENTS`** — now included in default project `.env` template.
+
+### Cluster health detection and auto-repair (v3.0.0)
+
+- **`weaklyConnected` detection** — status now shows `⚠ WEAKLY CONNECTED` when HP reports a node cannot reach all UNL peers
+- **Unreachable node identification** — compares UNL against peer list to identify which node is unreachable
+- **Auto-repair flow** — when weakly connected, offers to replace the unreachable node automatically: adds new node, waits 2 roundtimes for stabilisation, then removes the dead node
+- **Vote participation display** — UNL nodes show ✓/✗ reachability status when cluster is weakly connected

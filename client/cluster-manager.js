@@ -834,6 +834,49 @@ const opStatus = async () => {
         stat.currentUnl.forEach((pk,i)=>{ const n=nodes.find(n=>n.pubkey===pk); console.log(`    [${i}] ${pk.slice(0,20)}… ${n?n.domain:'(unknown)'} ${n?`(${timeRemaining(n).text})`:''}`); });
         console.log('  Peers            :');
         stat.peers.forEach(p=>console.log(`    ${p}`));
+        // Offer to replace unreachable nodes
+        if (stat.weaklyConnected) {
+            const peerDomains = stat.peers.map(p => p.split(':')[0]);
+            const unreachable = stat.currentUnl.slice(1).filter(pk => {
+                const n = nodes.find(n => n.pubkey === pk);
+                const domain = n ? n.domain : '';
+                return !peerDomains.some(p => domain.includes(p) || p.includes(domain));
+            });
+            if (unreachable.length > 0) {
+                console.log('\n  ⚠ Unreachable node(s) detected:');
+                unreachable.forEach(pk => {
+                    const n = nodes.find(n => n.pubkey === pk);
+                    console.log(`    ${pk.slice(0,20)}… ${n ? n.domain : 'unknown'}`);
+                });
+                const replace = (await ask('\n  Replace unreachable node(s) now? (yes/y or Enter to skip): ')).trim();
+                if (replace === 'yes' || replace === 'y') {
+                    for (const deadPubkey of unreachable) {
+                        const deadNode = nodes.find(n => n.pubkey === deadPubkey);
+                        console.log(`\n  Replacing ${deadPubkey.slice(0,20)}… (${deadNode ? deadNode.domain : 'unknown'})...`);
+                        // Step 1 — Add new node
+                        await opAddNode();
+                        // Step 2 — Wait 2 extra roundtimes for stability
+                        const roundtime = parseInt(process.env.HP_ROUNDTIME || 5000);
+                        console.log(`\n  Waiting ${(roundtime * 2 / 1000).toFixed(1)}s for new node to stabilise...`);
+                        await sleep(roundtime * 2);
+                        // Step 3 — Remove dead node
+                        console.log(`  Removing unreachable node ${deadPubkey.slice(0,20)}…`);
+                        try {
+                            const nodeInfo = nodes.find(n => n.pubkey === deadPubkey);
+                            await submitInput(ip, port, { type: 'removeNode', pubkey: deadPubkey, ip: nodeInfo?.domain, peerPort: nodeInfo?.peerPort });
+                            saveNodes(loadNodes().filter(n => n.pubkey !== deadPubkey));
+                            const expectedUnl = stat.currentUnl.length;
+                            await pollUntil(async () => {
+                                const s = await getStatus(ip, port);
+                                process.stdout.write(`  UNL: ${s.currentUnl.length}/${expectedUnl} | voteStatus: ${s.voteStatus}\r`);
+                                return s.currentUnl.length === expectedUnl && s.voteStatus === 'synced' ? s : null;
+                            }, roundtime * 20);
+                            console.log(`\n  ✓ Cluster repaired. UNL=${stat.currentUnl.length}`);
+                        } catch(e) { console.error(`  ✗ Failed to remove dead node: ${e.message}`); }
+                    }
+                }
+            }
+        }
         console.log('─────────────────────────────────────────────────────\n');
         return stat;
     } catch(e) { console.error(`  ✗ ${e.message}`); }
