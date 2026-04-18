@@ -23,3 +23,4 @@ client/cluster-manager.v1.js
 client/cluster-manager.v2.js
 backups/
 *.bak
+contract/dist/
