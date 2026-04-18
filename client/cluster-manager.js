@@ -1032,6 +1032,11 @@ const opRemoveNode = async () => {
                 console.log(`  ✓ Peer removed: ${peerIp}:${peerPort}`);
             } catch(e) { console.log(`  ⚠  Peer removal failed: ${e.message}`); }
         }
+        const doReport = (await askYesNo('  Report this host as problematic? (yes/y or Enter to skip): '));
+        if (isYes(doReport)) {
+            const ni = loadNodes().find(n => n.pubkey === targetPubkey) || {};
+            await reportHost(ni.host || targetPubkey, ni.domain || targetPubkey);
+        }
     } catch(e) { console.error(`\n  ✗ Remove failed: ${e.message}`); }
     console.log('─────────────────────────────────────────────────────\n');
 };
@@ -1342,7 +1347,8 @@ const managementMenu = async () => {
         console.log('    6. Extend node lease');
         console.log('    7. Find available hosts');
         console.log('    8. Read node log');
-        console.log('    9. Switch project');
+        console.log('    9. Report problematic host');
+        console.log('   10. Switch project');
         console.log('    0. Exit');
         console.log('');
         const choice=(await ask('  Choice: ')).trim();
@@ -1357,7 +1363,8 @@ const managementMenu = async () => {
             case '6': await opExtendLease(); break;
             case '7': await opFindHosts(); break;
             case '8': await opReadLog(); break;
-            case '9': return 'switch';
+            case '9': await opReportHost(); break;
+            case '10': return 'switch';
             case '0': console.log('  Goodbye.\n'); rl.close(); process.exit(0);
             default: console.log('  Invalid choice.\n');
         }

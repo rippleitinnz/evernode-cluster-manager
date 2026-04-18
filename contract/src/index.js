@@ -3,7 +3,7 @@ const HotPocket = require('hotpocket-nodejs-contract');
 const fs = require('fs');
 const child_process = require('child_process');
 
-const VERSION   = '13.0.0';
+const VERSION   = '13.1.0';
 
 const BUNDLE          = 'bundle.zip';
 const HP_CFG_OVERRIDE = 'hp.cfg.override';
@@ -65,8 +65,12 @@ const handleReadEnvVars = async (user, ctx) => {
         const raw = fs.readFileSync('/contract/env.vars', 'utf8');
         await send(user, { type: 'readEnvVars', version: VERSION, lcl: ctx.lclSeqNo, content: raw });
     } catch(e) {
-        log('readEnvVars error:', e.message);
-        await send(user, { type: 'error', message: e.message });
+        if (e.code === 'ENOENT') {
+            await send(user, { type: 'readEnvVars', version: VERSION, lcl: ctx.lclSeqNo, content: '(env.vars not present on this host — standard Sashimono installation)' });
+        } else {
+            log('readEnvVars error:', e.message);
+            await send(user, { type: 'error', message: e.message });
+        }
     }
 };
 const handleReadCfg = async (user, ctx) => {

@@ -17,11 +17,46 @@ A single tool for deploying and managing multiple HotPocket smart contract clust
 - Tracks node lease expiry and extends leases
 - Reports broken hosts to exclude them from future searches
 
+## Cluster Resilience
+
+When deploying a cluster, avoid placing more than one node on the same Evernode host. While multiple nodes on the same host will function normally under healthy conditions, the risk is significant:
+
+- If that host goes offline, you lose multiple UNL nodes simultaneously
+- In a 3-node cluster, losing 2 nodes makes consensus unrecoverable — the remaining node cannot reach the 66% threshold required to close ledgers
+- In a 4-node cluster, losing 2 nodes drops you to 2/4 which is also below threshold
+
+The `evdevkit cluster-create` command has a known chunk-size bug that can assign multiple nodes to the same host when that host has more than 1 available slot. The cluster manager detects this post-deploy and warns you. If this occurs:
+
+1. **Do not panic** — the cluster will still function if the nodes are healthy
+2. Add a replacement node on a different host first (ensures quorum is maintained)
+3. Remove one of the duplicate-host nodes after the new node has synced
+
+To minimise the risk of duplicates, prefer hosts with exactly 1 available slot when deploying.
+
 ## Requirements
 
 - Node.js v20+
 - `evdevkit` installed globally: `npm i evdevkit -g`
 - An XRPL/Xahau wallet funded with XAH and EVR tokens (tenant account)
+
+## Contract npm Package
+
+The cluster management contract handlers are available as a standalone npm package for use in your own HotPocket contracts:
+
+```bash
+npm install evernode-client-cluster-manager
+```
+
+```js
+const ClusterManager = require('evernode-client-cluster-manager');
+
+const contract = async (ctx) => {
+  if (await ClusterManager.init(ctx, VERSION)) return;
+  // your business logic
+};
+```
+
+See [evernode-client-cluster-manager on npm](https://www.npmjs.com/package/evernode-client-cluster-manager) for full documentation.
 
 > **Note:** The tool attempts to use locally installed `ws` and `evernode-js-client` packages first, falling back to the evdevkit global installation. If you encounter module not found errors, run `npm install` in the `client/` directory:
 > ```bash

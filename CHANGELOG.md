@@ -175,3 +175,12 @@
 - **Duplicate host detection** — post-deploy warning correctly catches when `cluster-create` assigns multiple nodes to the same host (evdevkit chunk-size bug). Recovery: add a good node first, then remove the duplicate.
 - **weaklyConnected threshold** — confirmed from HP source: `connected_peer_count < UNL_count * 0.7`. In a 3-node cluster requires 3 connected UNL peers (including self) to be strongly connected.
 - **Failed peers with peer_discovery disabled** — HP never removes failed peers from `req_known_remotes` when `peer_discovery.enabled=false`. Retries continue indefinitely.
+
+### Additional changes (v3.0.0 continued — 2026-04-19)
+
+- **Report problematic host** — new menu option 9 allows reporting any host to the API, excluding it from future searches for 7 days. Also offered automatically after removing a node via option 4.
+- **Switch project** — moved to option 10 to accommodate new report option.
+- **opReadLog expanded** — options 5 (patch.cfg) and 6 (env.vars) added. env.vars gracefully handles hosts without the file (standard Sashimono installations).
+- **Cluster resilience guidance** — README updated with warnings about placing multiple nodes on the same host and recovery procedures.
+- **Contract version** — bumped to 13.1.0 (env.vars ENOENT fix).
+- **npm package** — bumped to 1.1.2 (env.vars ENOENT fix, readPatchCfg and readEnvVars handlers added).
