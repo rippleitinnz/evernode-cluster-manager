@@ -3,7 +3,7 @@ const HotPocket = require('hotpocket-nodejs-contract');
 const fs = require('fs');
 const child_process = require('child_process');
 
-const VERSION   = '11.0.0';
+const VERSION   = '13.0.0';
 
 const BUNDLE          = 'bundle.zip';
 const HP_CFG_OVERRIDE = 'hp.cfg.override';
@@ -49,10 +49,31 @@ const handleStatus = async (user, ctx) => {
     });
 };
 
-const handleReadCfg = async (user, ctx) => {
-    log('readCfg → reading patch.cfg');
+const handleReadPatchCfg = async (user, ctx) => {
+    log('readPatchCfg -> reading patch.cfg via ctx.getConfig()');
     try {
         const cfg = await ctx.getConfig();
+        await send(user, { type: 'readPatchCfg', version: VERSION, lcl: ctx.lclSeqNo, cfg });
+    } catch(e) {
+        log('readPatchCfg error:', e.message);
+        await send(user, { type: 'error', message: e.message });
+    }
+};
+const handleReadEnvVars = async (user, ctx) => {
+    log('readEnvVars -> reading /contract/env.vars');
+    try {
+        const raw = fs.readFileSync('/contract/env.vars', 'utf8');
+        await send(user, { type: 'readEnvVars', version: VERSION, lcl: ctx.lclSeqNo, content: raw });
+    } catch(e) {
+        log('readEnvVars error:', e.message);
+        await send(user, { type: 'error', message: e.message });
+    }
+};
+const handleReadCfg = async (user, ctx) => {
+    log('readCfg → reading /contract/cfg/hp.cfg');
+    try {
+        const raw = fs.readFileSync('/contract/cfg/hp.cfg', 'utf8');
+        const cfg = JSON.parse(raw);
         log('readCfg → sending reply');
         await send(user, { type: 'readCfg', version: VERSION, lcl: ctx.lclSeqNo, cfg });
     } catch(e) {
@@ -254,6 +275,8 @@ const contract = async (ctx) => {
                 switch (msg.type) {
                     case 'status':  await handleStatus(user, ctx); break;
                     case 'readCfg': await handleReadCfg(user, ctx); break;
+                    case 'readPatchCfg': await handleReadPatchCfg(user, ctx); break;
+                    case 'readEnvVars': await handleReadEnvVars(user, ctx); break;
                     case 'readContractLog':
                         try {
                             const n = parseInt(msg.lines) || 100;

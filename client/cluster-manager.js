@@ -19,6 +19,9 @@ const { execSync } = require('child_process');
 const vm           = require('vm');
 const os           = require('os');
 
+// Suppress HP client connection logging (show errors only)
+require('hotpocket-js-client').setLogLevel(1);
+
 // ── Tool and projects paths ───────────────────────────────────
 const TOOL_DIR       = path.dirname(__dirname);
 const TOOL_CONTRACT  = path.join(TOOL_DIR, 'contract', 'dist');
@@ -715,6 +718,41 @@ const opDeploy = async () => {
 
 // ── Operations ────────────────────────────────────────────────
 
+
+// ── Cluster health check (parallel across all nodes) ─────────
+
+const checkClusterHealth = async (nodes) => {
+    if (!nodes || nodes.length === 0) return null;
+
+    const results = await Promise.all(nodes.map(async (node) => {
+        try {
+            const HP = require('hotpocket-js-client');
+            const keyPair = await HP.generateKeys();
+            const client = await HP.createClient(
+                [`wss://${node.domain}:${node.userPort}`],
+                keyPair,
+                { protocol: HP.protocols.json }
+            );
+            const connected = await client.connect();
+            if (!connected) return { node, error: 'connection failed' };
+            const [lcl, stat] = await Promise.all([client.getLcl(), client.getStatus()]);
+            await client.close().catch(() => {});
+            return { node, lcl, weaklyConnected: stat.weaklyConnected };
+        } catch(e) {
+            return { node, error: e.message };
+        }
+    }));
+
+    const reachable = results.filter(r => !r.error);
+    const unreachable = results.filter(r => r.error);
+    const hashes = reachable.map(r => r.lcl.ledgerHash);
+    const allHashesMatch = hashes.length > 0 && hashes.every(h => h === hashes[0]);
+    const anyWeaklyConnected = reachable.some(r => r.weaklyConnected);
+    const safeToRemove = allHashesMatch && !anyWeaklyConnected && unreachable.length === 0;
+
+    return { results, reachable, unreachable, allHashesMatch, anyWeaklyConnected, safeToRemove };
+};
+
 const opStatus = async () => {
     console.log('\n  Fetching cluster status...');
     try {
@@ -791,6 +829,23 @@ const opStatus = async () => {
                     }
                 }
             }
+        }
+        // Parallel health check across all nodes
+        console.log('\n── Node Health ───────────────────────────────────────');
+        const health = await checkClusterHealth(nodes);
+        if (health) {
+            health.results.forEach(r => {
+                const pubkey = r.node.pubkey ? r.node.pubkey.slice(0,20) + '…' : 'unknown';
+                if (r.error) {
+                    console.log(`  ✗ ${(r.node.domain||'').slice(0,25).padEnd(26)} ${pubkey}  UNREACHABLE — ${r.error}`);
+                } else {
+                    const lclOk = health.allHashesMatch ? '✓' : '✗';
+                    const wcOk  = r.weaklyConnected ? '⚠ ' : '✓';
+                    console.log(`  ${r.weaklyConnected ? '⚠' : '✓'} ${(r.node.domain||'').slice(0,25).padEnd(26)} ${pubkey}  LCL:${r.lcl.ledgerSeqNo} ${lclOk}  weaklyConnected: ${r.weaklyConnected ? 'true ' : 'false'} ${wcOk}`);
+                }
+            });
+            console.log(`  All hashes match : ${health.allHashesMatch ? '✓' : '✗ MISMATCH — possible fork'}`);
+            console.log(`  Safe to remove   : ${health.safeToRemove ? '✓' : '✗'}`);
         }
         console.log('─────────────────────────────────────────────────────\n');
         return stat;
@@ -1184,7 +1239,48 @@ const opReadLog = async () => {
     console.log('    1. hp.log (HotPocket)');
     console.log('    2. rw.stdout.log (contract stdout)');
     console.log('    3. rw.stderr.log (contract stderr)');
+    console.log('    4. hp.cfg (config)');
+    console.log('    5. patch.cfg (contract override)');
+    console.log('    6. env.vars (host environment)');
     const logChoice = (await ask('  Choice (default 1): ')).trim() || '1';
+    if (logChoice === '5' || logChoice === '6') {
+        try {
+            const HP = require('hotpocket-js-client');
+            const kp = await getKeyPair();
+            const client = await HP.createClient([`wss://${nodeInfo.domain}:${nodeInfo.userPort}`], kp, { protocol: HP.protocols.json });
+            const connected = await client.connect();
+            if (!connected) { console.error('  ✗ Connection failed.'); return; }
+            const reqType = logChoice === '5' ? 'readPatchCfg' : 'readEnvVars';
+            const label = logChoice === '5' ? 'patch.cfg' : 'env.vars';
+            const raw = await client.submitContractReadRequest(JSON.stringify({ type: reqType }));
+            await client.close().catch(()=>{});
+            const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            if (p.type === 'error') { console.error(`  ✗ ${p.message}`); return; }
+            console.log(`\n  Node: ${nodeInfo.domain} | ${label} | ${new Date().toISOString()}`);
+            console.log('─'.repeat(80));
+            console.log(logChoice === '5' ? JSON.stringify(p.cfg, null, 2) : p.content);
+            console.log('─────────────────────────────────────────────────────\n');
+        } catch(e) { console.error(`  ✗ ${e.message}`); }
+        return;
+    }
+    if (logChoice === '4') {
+        try {
+            const HP = require('hotpocket-js-client');
+            const kp = await getKeyPair();
+            const client = await HP.createClient([`wss://${nodeInfo.domain}:${nodeInfo.userPort}`], kp, { protocol: HP.protocols.json });
+            const connected = await client.connect();
+            if (!connected) { console.error('  ✗ Connection failed.'); return; }
+            const raw = await client.submitContractReadRequest(JSON.stringify({ type: 'readCfg' }));
+            await client.close().catch(()=>{});
+            const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            if (p.type === 'error') { console.error(`  ✗ ${p.message}`); return; }
+            console.log(`\n  Node: ${nodeInfo.domain} | hp.cfg | ${new Date().toISOString()}`);
+            console.log('─'.repeat(80));
+            console.log(JSON.stringify(p.cfg, null, 2));
+            console.log('─────────────────────────────────────────────────────\n');
+        } catch(e) { console.error(`  ✗ ${e.message}`); }
+        return;
+    }
     const logType = logChoice === '2' ? 'readContractLog' : logChoice === '3' ? 'readContractLog' : 'readLog';
     const logFile = logChoice === '3' ? 'stderr' : 'stdout';
     const linesStr = (await ask('  Lines to fetch (default 50): ')).trim() || '50';

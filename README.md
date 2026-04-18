@@ -9,9 +9,10 @@ A single tool for deploying and managing multiple HotPocket smart contract clust
 - Updates contract code live without restarting nodes or losing consensus
 - Adds external nodes to a running cluster — new nodes sync automatically, no manual bundle/deploy required
 - Removes nodes cleanly including stale peer cleanup
-- Reads logs remotely from any node in the cluster (hp.log, stdout, stderr) — no SSH required
-- Monitors cluster health, consensus status and vote state
+- Reads logs and config remotely from any node in the cluster (hp.log, stdout, stderr, hp.cfg, patch.cfg, env.vars) — no SSH required
+- Monitors cluster health, consensus status and vote state per node — includes LCL hash comparison, weaklyConnected status and safe-to-remove assessment
 - Detects weakly connected nodes and offers automatic cluster repair
+- Identifies nodes with custom host security layers via env.vars inspection
 - Discovers available Evernode hosts with operator diversity filtering and heartbeat quality validation
 - Tracks node lease expiry and extends leases
 - Reports broken hosts to exclude them from future searches

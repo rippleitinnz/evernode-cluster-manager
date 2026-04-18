@@ -149,3 +149,29 @@
 - **No single-slot warning** — if all entered hosts have 2 or more available slots, the user is warned and prompted to replace one host with a single-slot host. The user can also choose to proceed anyway with an explicit warning that double allocation risk remains.
 - **Inactive host rejection** — hosts that are inactive or not found on the Xahau ledger are rejected immediately at entry time, before any money is committed.
 - **Post-deploy duplicate host detection** — after `cluster-create` completes, the parsed node list is checked for duplicate host XRPL addresses. If any host received more than one node, a warning is displayed recommending the project be deleted and redeployed.
+
+### Additional changes (v3.0.0 continued — 2026-04-18)
+
+- **HP client logging suppressed** — `HP.setLogLevel(1)` added at startup to suppress connection noise (Connecting/Connected/Closing messages). Errors still shown.
+- **Node health check** — new `checkClusterHealth()` function queries all nodes in parallel. Displays per-node pubkey (truncated), LCL hash, weaklyConnected status and overall safe-to-remove assessment in `opStatus`.
+- **LCL hash mismatch detection** — health check compares LCL hashes across all reachable nodes. Flags mismatches as possible fork.
+- **Pubkey in health display** — each node row now shows truncated pubkey alongside domain, allowing identification of duplicate-domain nodes.
+- **Read node log expanded** — `opReadLog` now offers 6 options:
+  - 1. hp.log (unchanged)
+  - 2. rw.stdout.log (unchanged)
+  - 3. rw.stderr.log (unchanged)
+  - 4. hp.cfg — reads full running HP config directly from `/contract/cfg/hp.cfg`
+  - 5. patch.cfg — reads contract override config via `ctx.getConfig()`
+  - 6. env.vars — reads host environment variables from `/contract/env.vars` (external ports, quotas, security config)
+- **`readCfg` contract handler fixed** — was using `ctx.getConfig()` (returns contract override only). Now reads `/contract/cfg/hp.cfg` directly for the full running config including mesh, user, node sections and `known_peers`.
+- **`readPatchCfg` contract handler** — new handler returns the contract override config via `ctx.getConfig()`.
+- **`readEnvVars` contract handler** — new handler reads and returns `/contract/env.vars` as raw text.
+- **Contract version** — bumped to `13.0.0`.
+
+### Key discoveries (2026-04-18)
+
+- **Host security layer peering issue** — some Evernode hosts implement a custom inbound security layer on their peer port that blocks unauthenticated connections. Other nodes time out attempting outbound connections to these hosts. Consensus can still function because the secured host connects outbound to others, but the cluster topology becomes fragile — the secured host acts as a hub and the remaining nodes become dependent on it as a relay. Two such hosts in a 3-node cluster means the third node is a single point of failure for inter-node communication. The `env.vars` file (now readable via option 6) exposes `INTERNAL_SECURITY` which reveals whether a host has this layer enabled.
+- **HP self-connection behaviour** — primary nodes (empty `known_peers`) can receive their own address via peer forwarding from connected nodes and attempt to connect to themselves. HP does not filter self-addresses before attempting connections.
+- **Duplicate host detection** — post-deploy warning correctly catches when `cluster-create` assigns multiple nodes to the same host (evdevkit chunk-size bug). Recovery: add a good node first, then remove the duplicate.
+- **weaklyConnected threshold** — confirmed from HP source: `connected_peer_count < UNL_count * 0.7`. In a 3-node cluster requires 3 connected UNL peers (including self) to be strongly connected.
+- **Failed peers with peer_discovery disabled** — HP never removes failed peers from `req_known_remotes` when `peer_discovery.enabled=false`. Retries continue indefinitely.
