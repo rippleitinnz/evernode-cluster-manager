@@ -1,12 +1,11 @@
 {
   "name": "evernode-cluster-manager-contract",
-  "version": "4.0.0",
+  "version": "1.0.0",
   "scripts": {
-    "build": "npx ncc build src/index.js -o dist",
-    "build:prod": "npx ncc build src/index.js --minify -o dist"
+    "build": "npx ncc build src/index.js -o dist"
   },
   "dependencies": {
     "hotpocket-nodejs-contract": "0.7.4",
-    "@vercel/ncc": "0.34.0"
+    "evernode-client-cluster-manager": "1.0.0"
   }
 }

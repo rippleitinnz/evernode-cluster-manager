@@ -506,6 +506,64 @@ const verifyHosts = async (hostAddrs, requiredSlots = 1) => {
 
 // ── Deploy ────────────────────────────────────────────────────
 
+
+// ── Host Selection with live slot verification ────────────────
+
+const selectHosts = async (nodeCount) => {
+    console.log(`\n  Enter ${nodeCount} host XRPL address(es).\n`);
+
+    const hostResults = [];
+
+    for (let i = 1; i <= nodeCount; i++) {
+        while (true) {
+            const addr = (await ask(`  Host ${i}: `)).trim();
+            if (!addr) continue;
+
+            const { results } = await verifyHosts([addr], 1);
+            const result = results[0];
+
+            if (!result || !result.active) {
+                console.log('  ✗ Host not found or inactive. Try another.');
+                continue;
+            }
+
+            hostResults.push({ addr, available: result.available });
+            break;
+        }
+    }
+
+    // Sort — single-slot hosts first
+    hostResults.sort((a, b) => a.available - b.available);
+
+    // Ensure first host has exactly 1 slot
+    while (hostResults[0].available > 1) {
+        console.log('\n  ⚠  No single-slot host available — risk of double allocation on same host.');
+        console.log('  Current order:');
+        hostResults.forEach((h, i) => console.log(`    ${i+1}. ${h.addr} — ${h.available} slot(s)`));
+        console.log('\n  Please replace one host with a single-slot host.');
+        const idxStr = (await ask(`  Replace host number (1-${nodeCount}) or Enter to proceed anyway: `)).trim();
+        if (!idxStr) {
+            console.log('  ⚠  Proceeding without a single-slot host — double allocation risk remains.');
+            break;
+        }
+        const idx = parseInt(idxStr) - 1;
+        if (isNaN(idx) || idx < 0 || idx >= nodeCount) { console.log('  Invalid number.'); continue; }
+        const newAddr = (await ask('  New host address: ')).trim();
+        if (!newAddr) { console.log('  Cancelled.'); return null; }
+        const { results } = await verifyHosts([newAddr], 1);
+        const result = results[0];
+        if (!result || !result.active) { console.log('  ✗ Host not found or inactive. Try again.'); continue; }
+        console.log(`  ✓ ${newAddr} — ${result.available} slot(s) available`);
+        hostResults[idx] = { addr: newAddr, available: result.available };
+        hostResults.sort((a, b) => a.available - b.available);
+    }
+
+    console.log('\n  ✓ Final host order:');
+    hostResults.forEach((h, i) => console.log(`    ${i+1}. ${h.addr} — ${h.available} slot(s)`));
+
+    return hostResults.map(h => h.addr);
+};
+
 const opDeploy = async () => {
     console.log('\n── Deploy New Cluster ───────────────────────────────');
 
@@ -524,11 +582,8 @@ const opDeploy = async () => {
         console.log('  Must be >= 3.');
     }
 
-    console.log(`\n  Enter ${nodeCount} host XRPL address(es).\n`);
-    const hostAddrs=[];
-    for (let i=1;i<=nodeCount;i++) {
-        while (true) { const a=(await ask(`  Host ${i}: `)).trim(); if(a){hostAddrs.push(a);break;} }
-    }
+    const hostAddrs = await selectHosts(nodeCount);
+    if (!hostAddrs) { console.log('  Cancelled.'); return false; }
 
     let moments;
     while (true) {
@@ -634,6 +689,17 @@ const opDeploy = async () => {
             lifeMoments      : n.life_moments
         }));
         saveNodes(nodeRecords);
+
+        // Check for duplicate hosts — indicates cluster-create chunk algorithm bug
+        const hostCounts = {};
+        nodeRecords.forEach(n => { hostCounts[n.host] = (hostCounts[n.host] || 0) + 1; });
+        const duplicateHosts = Object.entries(hostCounts).filter(([h, c]) => c > 1);
+        if (duplicateHosts.length > 0) {
+            console.log('\n  ⚠  WARNING: Multiple nodes deployed to the same host:');
+            duplicateHosts.forEach(([h, c]) => console.log(`    ${h} — ${c} nodes`));
+            console.log('  This will cause 0-peer consensus issues.');
+            console.log('  Recommendation: delete this project and redeploy with different hosts.\n');
+        }
 
         console.log(`  ✓ Contract ID : ${contractId}`);
         console.log(`  ✓ Connecting  : ${ip}:${port}`);

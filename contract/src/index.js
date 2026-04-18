@@ -3,7 +3,7 @@ const HotPocket = require('hotpocket-nodejs-contract');
 const fs = require('fs');
 const child_process = require('child_process');
 
-const VERSION   = '10.0.0';
+const VERSION   = '11.0.0';
 
 const BUNDLE          = 'bundle.zip';
 const HP_CFG_OVERRIDE = 'hp.cfg.override';

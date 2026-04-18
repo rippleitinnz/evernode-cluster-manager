@@ -141,3 +141,11 @@
 - **Single-slot host guarantee** — host finder now always returns at least 10 single-slot hosts at the top of results, clearly labelled as recommended for deployment.
 - **cluster-create bug warning** — deploy flow warns about the evdevkit chunk-size bug and explains the single-slot workaround.
 - **Icon spacing** — added consistent spacing after all ⚠, ✓, ✗ icons in console output.
+
+### Host slot verification and single-slot enforcement (v3.0.0 continued)
+
+- **`selectHosts` function** — new pre-deploy host selection function that verifies each host's available slot count against the Xahau ledger immediately as the user enters each address. Replaces the simple address entry loop in `opDeploy`.
+- **Single-slot first ordering** — after all hosts are entered, hosts are automatically sorted so the host with the fewest available slots (ideally 1) is placed first in the `cluster-create` hosts file. This directly mitigates the evdevkit chunk-size allocation bug.
+- **No single-slot warning** — if all entered hosts have 2 or more available slots, the user is warned and prompted to replace one host with a single-slot host. The user can also choose to proceed anyway with an explicit warning that double allocation risk remains.
+- **Inactive host rejection** — hosts that are inactive or not found on the Xahau ledger are rejected immediately at entry time, before any money is committed.
+- **Post-deploy duplicate host detection** — after `cluster-create` completes, the parsed node list is checked for duplicate host XRPL addresses. If any host received more than one node, a warning is displayed recommending the project be deleted and redeployed.

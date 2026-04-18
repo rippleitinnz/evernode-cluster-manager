@@ -1,18 +1,18 @@
 /******/ (() => { // webpackBootstrap
 /******/ 	var __webpack_modules__ = ({
 
-/***/ 875:
+/***/ 692:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 /******/ (() => { // webpackBootstrap
 /******/ 	var __webpack_modules__ = ({
 
 /***/ 782:
-/***/ ((__unused_webpack_module, __webpack_exports__, __nccwpck_require2_) => {
+/***/ ((__unused_webpack_module, __nested_webpack_exports__, __nccwpck_require2_) => {
 
 "use strict";
-__nccwpck_require2_.r(__webpack_exports__);
-/* harmony export */ __nccwpck_require2_.d(__webpack_exports__, {
+__nccwpck_require2_.r(__nested_webpack_exports__);
+/* harmony export */ __nccwpck_require2_.d(__nested_webpack_exports__, {
 /* harmony export */   "controlMessages": () => (/* binding */ controlMessages),
 /* harmony export */   "clientProtocols": () => (/* binding */ clientProtocols),
 /* harmony export */   "constants": () => (/* binding */ constants),
@@ -71,14 +71,14 @@ function errHandler(err) {
 /***/ }),
 
 /***/ 244:
-/***/ ((__unused_webpack_module, __webpack_exports__, __nccwpck_require2_) => {
+/***/ ((__unused_webpack_module, __nested_webpack_exports__, __nccwpck_require2_) => {
 
 "use strict";
 // ESM COMPAT FLAG
-__nccwpck_require2_.r(__webpack_exports__);
+__nccwpck_require2_.r(__nested_webpack_exports__);
 
 // EXPORTS
-__nccwpck_require2_.d(__webpack_exports__, {
+__nccwpck_require2_.d(__nested_webpack_exports__, {
   "HotPocketContract": () => (/* binding */ HotPocketContract)
 });
 
@@ -526,7 +526,7 @@ module.exports = {
 /***/ ((module) => {
 
 "use strict";
-module.exports = __nccwpck_require__(147);
+module.exports = __nccwpck_require__(896);
 
 /***/ }),
 
@@ -534,7 +534,7 @@ module.exports = __nccwpck_require__(147);
 /***/ ((module) => {
 
 "use strict";
-module.exports = __nccwpck_require__(224);
+module.exports = __nccwpck_require__(18);
 
 /***/ })
 
@@ -608,15 +608,15 @@ module.exports = __nccwpck_require__(224);
 /******/ 	// startup
 /******/ 	// Load entry module and return exports
 /******/ 	// This entry module is referenced by other modules so it can't be inlined
-/******/ 	var __webpack_exports__ = __nccwpck_require2_(53);
-/******/ 	module.exports = __webpack_exports__;
+/******/ 	var __nested_webpack_exports__ = __nccwpck_require2_(53);
+/******/ 	module.exports = __nested_webpack_exports__;
 /******/ 	
 /******/ })()
 ;
 
 /***/ }),
 
-/***/ 81:
+/***/ 317:
 /***/ ((module) => {
 
 "use strict";
@@ -624,7 +624,7 @@ module.exports = require("child_process");
 
 /***/ }),
 
-/***/ 147:
+/***/ 896:
 /***/ ((module) => {
 
 "use strict";
@@ -632,7 +632,7 @@ module.exports = require("fs");
 
 /***/ }),
 
-/***/ 224:
+/***/ 18:
 /***/ ((module) => {
 
 "use strict";
@@ -683,11 +683,11 @@ var __webpack_exports__ = {};
 (() => {
 "use strict";
 
-const HotPocket = __nccwpck_require__(875);
-const fs = __nccwpck_require__(147);
-const child_process = __nccwpck_require__(81);
+const HotPocket = __nccwpck_require__(692);
+const fs = __nccwpck_require__(896);
+const child_process = __nccwpck_require__(317);
 
-const VERSION   = '10.0.0';
+const VERSION   = '11.0.0';
 
 const BUNDLE          = 'bundle.zip';
 const HP_CFG_OVERRIDE = 'hp.cfg.override';

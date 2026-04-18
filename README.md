@@ -179,7 +179,7 @@ HOST_API_URL=http://your-api:3001
 >
 > When two nodes end up on the same host, they cannot peer with each other due to hairpin NAT — the containers cannot route traffic back to each other via the host's external IP. This results in `⚠  WEAKLY CONNECTED` and only one peer showing in the cluster status.
 >
-> **Workaround:** The host finder always returns at least 10 single-slot hosts at the top of the list, clearly labelled as recommended for deployment. With only 1 slot available, `evdevkit` cannot place a second node on that host and is forced to use a different host for each node.
+> **Workaround:** The deploy flow now verifies each host's available slot count against the Xahau ledger as you enter addresses. Hosts are automatically reordered so the single-slot host is always first in the `cluster-create` hosts file — `evdevkit` cannot place a second node on a host with only 1 slot, forcing it to use a different host for each subsequent node. If no single-slot host is selected, you are warned and prompted to replace one before proceeding. After deployment, the tool also checks the output for duplicate host assignments and warns if any host received more than one node.
 
 ## Input Validation
 
