@@ -1,3 +1,7 @@
+## v3.0.1 (2026-04-26)
+### Contract npm package (evernode-client-cluster-manager@1.1.3)
+- **Ghost peer fix** — `removeNode` now patches `hp.cfg` `known_peers` directly to remove departed node's peer address. Previously HotPocket would continue trying to connect to removed nodes indefinitely, clouding logs and causing spurious "Trying to connect" entries.
+
 # Evernode Cluster Manager — Changelog
 
 
