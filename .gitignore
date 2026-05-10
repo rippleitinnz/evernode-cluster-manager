@@ -24,3 +24,14 @@ client/cluster-manager.v2.js
 backups/
 *.bak
 contract/dist/
+
+# Backup files
+client/*.bk*
+client/*.working*
+client/*0100*
+client/*addnode*
+client/*purge*
+contract.bak*/
+contract/src/index*.js
+!contract/src/index.js
+patches/

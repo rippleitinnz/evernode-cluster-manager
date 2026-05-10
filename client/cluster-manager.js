@@ -10,7 +10,7 @@
 
 'use strict';
 
-const TOOL_VERSION = 'v3.0.0';
+const TOOL_VERSION = 'v3.1.0';
 
 const path         = require('path');
 const fs           = require('fs');
@@ -27,7 +27,39 @@ const TOOL_DIR       = path.dirname(__dirname);
 const TOOL_CONTRACT  = path.join(TOOL_DIR, 'contract', 'dist');
 const PROJECTS_DIR   = path.join(os.homedir(), '.evernode-clusters', 'projects');
 const GLOBAL_ENV     = path.join(os.homedir(), '.evernode-clusters', '.env');
-const MOMENT_SECONDS = 3600;
+const MOMENT_BASE_IDX = 1702531862; // Evernode epoch (unix seconds) — verified 6 May 2026
+const MOMENT_SIZE     = 3600;       // Seconds per moment (1 hour)
+
+const momentToTimestamp = (moment) => MOMENT_BASE_IDX + (moment * MOMENT_SIZE);
+const momentToDate = (moment) => new Date(momentToTimestamp(moment) * 1000).toUTCString();
+const getExpiryTimestamp = (node) => {
+    if (node.expiryMoment) return momentToTimestamp(node.expiryMoment);
+    const createdSec = node.createdTimestamp > 9999999999
+        ? Math.floor(node.createdTimestamp / 1000)
+        : node.createdTimestamp;
+    return createdSec + (node.lifeMoments * MOMENT_SIZE);
+};
+
+
+
+const getEvernodeTenant = async () => {
+    const xahauWs = process.env.XAHAU_WS || process.env.EV_XAHAUD_SERVER || 'wss://xahau.network';
+    const evernode = (() => { try { return require('evernode-js-client'); } catch { return require('/usr/lib/node_modules/evdevkit/node_modules/evernode-js-client'); } })();
+    await evernode.Defaults.useNetwork('mainnet');
+    const xrplApi = new evernode.XrplApi(xahauWs);
+    evernode.Defaults.set({ xrplApi });
+    await xrplApi.connect();
+    const tenant = new evernode.TenantClient(process.env.EV_TENANT_ADDRESS, process.env.EV_TENANT_SECRET);
+    await tenant.connect();
+    return { evernode, xrplApi, tenant };
+};
+
+// ── Ensure ncc bundle is in node_modules ─────────────────────
+const ensureNccBundle = (targetNodeModules) => {
+    const src = path.join(TOOL_DIR, 'contract', 'dist', 'node_modules', 'evernode-client-cluster-manager');
+    const dst = path.join(targetNodeModules, 'evernode-client-cluster-manager');
+    execSync(`rm -rf "${dst}" && cp -r "${src}" "${dst}"`);
+};
 
 // ── Current project state (set at runtime) ────────────────────
 let PROJECT_DIR  = null;
@@ -131,13 +163,24 @@ const loadNodes = () => {
     return [];
 };
 const saveNodes = (nodes) => fs.writeFileSync(NODES_FILE, JSON.stringify(nodes, null, 2));
-const reconcileNodes = (nodes, currentUnl) => nodes.filter(n => currentUnl.includes(n.pubkey));
+// Only reconcile cluster-nodes.json when cluster is fully synced and UNL is stable.
+// Never strip records during a crisis — only remove nodes that have cleanly left the UNL
+// and where the remaining UNL count is >= 3 (minimum viable cluster).
+const reconcileNodes = (nodes, currentUnl, voteStatus) => {
+    if (voteStatus !== 'synced') return nodes; // never strip during unstable state
+    if (currentUnl.length < 3) return nodes;   // never strip below minimum
+    return nodes.filter(n => currentUnl.includes(n.pubkey));
+};
 
 const timeRemaining = (node) => {
-    const expirySec = Math.floor(node.createdTimestamp / 1000) + (node.lifeMoments * MOMENT_SECONDS);
-    const remaining = expirySec - Math.floor(Date.now() / 1000);
+    const expirySec = getExpiryTimestamp(node);
+    const nowSec    = Math.floor(Date.now() / 1000);
+    const remaining = expirySec - nowSec;
     if (remaining <= 0) return { expired: true, text: 'EXPIRED', expirySec };
-    return { expired: false, text: `${Math.floor(remaining/3600)}h ${Math.floor((remaining%3600)/60)}m`, expirySec, remaining };
+    const h = Math.floor(remaining / 3600);
+    const m = Math.floor((remaining % 3600) / 60);
+    const s = remaining % 60;
+    return { expired: false, text: `${h}h ${m}m ${s}s`, expirySec, remaining };
 };
 
 // ── HP Client Helpers ─────────────────────────────────────────
@@ -290,7 +333,7 @@ const findHostsViaAPI = async (apiUrl, minSlots, targetCount, minRep, includeUns
     ));
     console.log('  ' + hr(131));
     console.log('\n  ' + hosts.length + ' host(s) — ' + singleHosts.length + ' single-slot (recommended for deployment).');
-    if (allowReport) console.log('  To report a bad host enter its full XRPL address.');
+    if (allowReport) console.log('  To report a bad host enter its full Xahau address.');
     console.log('');
 
     return hosts;
@@ -341,8 +384,8 @@ const setupGlobalCredentials = async () => {
         } else { console.log('  ✓ Keys generated.'); }
     }
 
-    // XRPL credentials
-    console.log('\n── XRPL Tenant Credentials ───────────────────────────');
+    // Xahau credentials
+    console.log('\n── Xahau Tenant Credentials ───────────────────────────');
     const tenantSecret  = (await ask('  EV_TENANT_SECRET : ')).trim();
     const tenantAddress = (await ask('  EV_TENANT_ADDRESS: ')).trim();
 
@@ -425,7 +468,7 @@ ALERT_MIN_MOMENTS=12
     }, null, 2));
 
     // Write hp.cfg.override
-    const overrideCfg = { contract: { bin_path:'/usr/bin/node', bin_args:'index.js', consensus:{ roundtime:parseInt(roundtime), threshold:parseInt(threshold) } } };
+    const overrideCfg = { contract: { bin_path:'/usr/bin/node', bin_args:'index.js', read_request_exec: true, consensus:{ roundtime:parseInt(roundtime), threshold:parseInt(threshold) } } };
     fs.writeFileSync(path.join(projectDir, 'hp.cfg.override'), JSON.stringify(overrideCfg, null, 2));
 
     // Copy contract files (skip node_modules and directories)
@@ -451,8 +494,22 @@ ALERT_MIN_MOMENTS=12
 
     // Install contract dependencies
     if (fs.existsSync(path.join(CONTRACT_DIR, 'package.json'))) {
+        // Rewrite file: paths to absolute so they resolve correctly from the project dir
+        const pkgPath = path.join(CONTRACT_DIR, 'package.json');
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+        let changed = false;
+        for (const [dep, ver] of Object.entries(pkg.dependencies || {})) {
+            if (ver.startsWith('file:')) {
+                const rel = ver.slice(5);
+                const abs = path.resolve(TOOL_CONTRACT, rel);
+                pkg.dependencies[dep] = `file:${abs}`;
+                changed = true;
+            }
+        }
+        if (changed) fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
         console.log('\n  Installing contract dependencies...');
         execSync(`npm install --prefix ${CONTRACT_DIR} --silent`);
+        ensureNccBundle(`${CONTRACT_DIR}/node_modules`);
         console.log('  ✓ Done');
     }
 
@@ -466,7 +523,7 @@ ALERT_MIN_MOMENTS=12
 
 // ── Verify host availability (live check) ─────────────────────
 const verifyHosts = async (hostAddrs, requiredSlots = 1) => {
-    const xahauWs = process.env.XAHAU_WS || 'wss://xahau.network';
+    const xahauWs = process.env.XAHAU_WS || process.env.EV_XAHAUD_SERVER || 'wss://xahau.network';
     console.log('\n  Verifying host availability via ' + xahauWs + '...');
     try {
         const evernode = (() => { try { return require('evernode-js-client'); } catch { return require('/usr/lib/node_modules/evdevkit/node_modules/evernode-js-client'); } })();
@@ -513,7 +570,7 @@ const verifyHosts = async (hostAddrs, requiredSlots = 1) => {
 // ── Host Selection with live slot verification ────────────────
 
 const selectHosts = async (nodeCount) => {
-    console.log(`\n  Enter ${nodeCount} host XRPL address(es).\n`);
+    console.log(`\n  Enter ${nodeCount} host Xahau address(es).\n`);
 
     const hostResults = [];
 
@@ -535,8 +592,6 @@ const selectHosts = async (nodeCount) => {
         }
     }
 
-    // Sort — single-slot hosts first
-    hostResults.sort((a, b) => a.available - b.available);
 
     // Ensure first host has exactly 1 slot
     while (hostResults[0].available > 1) {
@@ -558,7 +613,6 @@ const selectHosts = async (nodeCount) => {
         if (!result || !result.active) { console.log('  ✗ Host not found or inactive. Try again.'); continue; }
         console.log(`  ✓ ${newAddr} — ${result.available} slot(s) available`);
         hostResults[idx] = { addr: newAddr, available: result.available };
-        hostResults.sort((a, b) => a.available - b.available);
     }
 
     console.log('\n  ✓ Final host order:');
@@ -634,7 +688,10 @@ const opDeploy = async () => {
     console.log('[1/3] Installing contract dependencies...');
     const pkgJson = path.join(CONTRACT_DIR, 'package.json');
     const hasDeps = fs.existsSync(pkgJson) && Object.keys(JSON.parse(fs.readFileSync(pkgJson,'utf8')).dependencies || {}).length > 0;
-    if (hasDeps) execSync(`npm install --prefix ${CONTRACT_DIR} --silent`);
+    if (hasDeps) {
+        execSync(`npm install --prefix ${CONTRACT_DIR} --silent`);
+        ensureNccBundle(`${CONTRACT_DIR}/node_modules`);
+    }
     console.log('      ✓ Done.');
 
     console.log('[2/3] Writing authorized_pubkey.txt...');
@@ -650,7 +707,7 @@ const opDeploy = async () => {
         process.env.EV_HP_INIT_CFG_PATH = INITCFG;
         delete process.env.EV_HP_OVERRIDE_CFG_PATH;
         clusterOutput = execSync(
-            `${sudo}evdevkit cluster-create ${nodeCount} -m ${moments} "${CONTRACT_DIR}" /usr/bin/node "${hostsFile}" -a index.js`,
+            `${sudo}evdevkit cluster-create ${nodeCount} "${CONTRACT_DIR}" /usr/bin/node "${hostsFile}" -m ${moments} -a index.js`,
             { encoding:'utf8', env: process.env }
         );
         process.stdout.write(clusterOutput);
@@ -707,6 +764,7 @@ const opDeploy = async () => {
         console.log(`  ✓ Contract ID : ${contractId}`);
         console.log(`  ✓ Connecting  : ${ip}:${port}`);
         console.log(`  ✓ Saved ${nodeRecords.length} node(s) to cluster-nodes.json`);
+
     }
 
     if (!contractId||!ip||!port) { console.log('  ✗ Missing cluster details.'); return false; }
@@ -733,11 +791,17 @@ const checkClusterHealth = async (nodes) => {
                 keyPair,
                 { protocol: HP.protocols.json }
             );
-            const connected = await client.connect();
-            if (!connected) return { node, error: 'connection failed' };
-            const [lcl, stat] = await Promise.all([client.getLcl(), client.getStatus()]);
-            await client.close().catch(() => {});
-            return { node, lcl, weaklyConnected: stat.weaklyConnected };
+            const result = await Promise.race([
+                (async () => {
+                    const connected = await client.connect();
+                    if (!connected) return { node, error: 'connection failed' };
+                    const [lcl, stat] = await Promise.all([client.getLcl(), client.getStatus()]);
+                    await client.close().catch(() => {});
+                    return { node, lcl, weaklyConnected: stat.weaklyConnected };
+                })(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000))
+            ]);
+            return result;
         } catch(e) {
             return { node, error: e.message };
         }
@@ -758,8 +822,11 @@ const opStatus = async () => {
     try {
         const stat = await getStatus(ip, port);
         let nodes = loadNodes();
-        const reconciled = reconcileNodes(nodes, stat.currentUnl);
-        if (reconciled.length!==nodes.length) { saveNodes(reconciled); nodes=reconciled; }
+        const reconciled = reconcileNodes(nodes, stat.currentUnl, stat.voteStatus);
+        if (reconciled.length !== nodes.length && stat.voteStatus === 'synced' && stat.currentUnl.length >= 3) {
+            saveNodes(reconciled);
+            nodes = reconciled;
+        }
 
         const contractVersion = await getContractVersion(ip, port);
 
@@ -817,7 +884,7 @@ const opStatus = async () => {
                                     const expectedUnl = stat.currentUnl.length;
                                     await pollUntil(async () => {
                                         const s = await getStatus(ip, port);
-                                        process.stdout.write(`  UNL: ${s.currentUnl.length}/${expectedUnl} | voteStatus: ${s.voteStatus}\r`);
+                                        process.stdout.write(`  UNL: ${s.currentUnl.length}/${expectedUnl} | voteStatus: ${s.voteStatus}          \r`);
                                         return s.currentUnl.length === expectedUnl && s.voteStatus === 'synced' ? s : null;
                                     }, roundtime * 20);
                                     console.log(`\n  ✓ Cluster repaired. UNL=${expectedUnl}`);
@@ -839,9 +906,9 @@ const opStatus = async () => {
                 if (r.error) {
                     console.log(`  ✗ ${(r.node.domain||'').slice(0,25).padEnd(26)} ${pubkey}  UNREACHABLE — ${r.error}`);
                 } else {
-                    const lclOk = health.allHashesMatch ? '✓' : '✗';
-                    const wcOk  = r.weaklyConnected ? '⚠ ' : '✓';
-                    console.log(`  ${r.weaklyConnected ? '⚠' : '✓'} ${(r.node.domain||'').slice(0,25).padEnd(26)} ${pubkey}  LCL:${r.lcl.ledgerSeqNo} ${lclOk}  weaklyConnected: ${r.weaklyConnected ? 'true ' : 'false'} ${wcOk}`);
+                    const lclOk = health.allHashesMatch ? '' : ' ✗ HASH MISMATCH';
+                    const wcWarn = r.weaklyConnected ? '  ⚠ WEAKLY CONNECTED' : '';
+                    console.log(`  ${r.weaklyConnected ? '⚠' : '✓'} ${(r.node.domain||'').slice(0,25).padEnd(26)} ${pubkey}  LCL:${r.lcl.ledgerSeqNo}${lclOk}${wcWarn}`);
                 }
             });
             console.log(`  All hashes match : ${health.allHashesMatch ? '✓' : '✗ MISMATCH — possible fork'}`);
@@ -877,6 +944,13 @@ const opUpdateContract = async () => {
 
     const builtIndex = path.join(TOOL_CONTRACT, 'index.js');
     fs.copyFileSync(builtIndex, path.join(CONTRACT_DIR, 'index.js'));
+    // Copy node_modules from dist to CONTRACT_DIR
+    const distNodeModules = path.join(TOOL_CONTRACT, 'node_modules');
+    if (fs.existsSync(distNodeModules)) {
+        execSync(`cp -r "${distNodeModules}" "${CONTRACT_DIR}/"`, { encoding: 'utf8' });
+        ensureNccBundle(`${CONTRACT_DIR}/node_modules`);
+        console.log('  ✓ Copied node_modules to project.');
+    }
     console.log('  ✓ Copied built contract to project.');
 
     const firstNode = stat.currentUnl[0];
@@ -895,7 +969,7 @@ const opUpdateContract = async () => {
         const roundtime = parseInt(process.env.HP_ROUNDTIME || 6000);
         await pollUntil(async () => {
             const v = await getContractVersion(ip, port);
-            process.stdout.write(`  Checking version: ${v}\r`);
+            process.stdout.write(`  Checking version: ${v}          \r`);
             return v === newVersion ? v : null;
         }, roundtime * 20);
         console.log(`\n  ✓ Contract updated to ${newVersion}`);
@@ -916,7 +990,7 @@ const opAddNode = async () => {
     if (isYes(findFirst)) { await findHosts(1,20); await ask('  Press Enter to continue...'); }
 
     console.log('\n  ── STEP 1: Acquire ───────────────────────────────');
-    const extHost=(await ask('  External host XRPL address: ')).trim();
+    const extHost=(await ask('  External host Xahau address: ')).trim();
     const moments=(await ask(`  Life moments (default ${process.env.DEFAULT_MOMENTS||3}): `)).trim()||(process.env.DEFAULT_MOMENTS||'3');
     if (!extHost) { console.log('  Cancelled.'); return; }
 
@@ -930,6 +1004,32 @@ const opAddNode = async () => {
     const roundtime = parseInt(process.env.HP_ROUNDTIME||5000);
     const threshold = parseInt(process.env.HP_THRESHOLD||66);
     const logLevel = process.env.HP_LOG_LEVEL||'dbg';
+    // Ask cluster which node is best for bootstrapping — cluster has ground truth
+    // on peer connectivity. Falls back to stat.peers[0] if unavailable.
+    let bootstrapPeer = null;
+    try {
+        const HP2 = require('hotpocket-js-client');
+        const kp2 = await getKeyPair();
+        const bpClient = await HP2.createClient([`wss://${ip}:${port}`], kp2, { protocol: HP2.protocols.json });
+        const bpConnected = await bpClient.connect();
+        if (bpConnected) {
+            const raw = await bpClient.submitContractReadRequest(JSON.stringify({ type: 'getBootstrapPeer' }));
+            await bpClient.close().catch(() => {});
+            const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            if (p && p.domain && p.peerPort) {
+                bootstrapPeer = `${p.domain}:${p.peerPort}`;
+                console.log(`  ✓ Bootstrap peer selected by cluster: ${bootstrapPeer}`);
+            }
+        }
+    } catch(e) {
+        console.log(`  ⚠  Could not get bootstrap peer from cluster: ${e.message}`);
+    }
+    if (!bootstrapPeer) {
+        bootstrapPeer = stat.peers.length > 0 ? stat.peers[0] : `${ip}:${parseInt(port)-1}`;
+        console.log(`  ⚠  Using fallback bootstrap peer: ${bootstrapPeer}`);
+    }
+
+    // initCfg goes into Xahau memo — 1 peer only to stay under 1KB limit.
     const initCfg = {
         contract: {
             bin_path: '/usr/bin/node',
@@ -939,13 +1039,13 @@ const opAddNode = async () => {
         },
         mesh: {
             peer_discovery: { enabled: process.env.HP_PEER_DISCOVERY==='true' },
-            known_peers: stat.peers.length > 0 ? stat.peers : [`${ip}:${parseInt(port)-1}`]
+            known_peers: [bootstrapPeer]
         },
         log: { log_level: logLevel }
     };
     const initCfgPath = path.join(PROJECT_DIR, 'node-init-temp.cfg');
     fs.writeFileSync(initCfgPath, JSON.stringify(initCfg, null, 2));
-    console.log(`  ✓ Init config written (peer: ${initCfg.mesh.known_peers[0]})`);
+    console.log(`  ✓ Init config written (peer: ${bootstrapPeer})`);
 
     let acquireOutput;
     try {
@@ -967,23 +1067,152 @@ const opAddNode = async () => {
     const ts   =parseInt((acquireOutput.match(/created_timestamp['":\s]+(\d+)/)||[])[1]||Date.now());
     if (!pub||!peer||!user||!dom) { console.error('  ✗ Could not parse acquire output.'); return; }
 
-    console.log('\n  ── STEP 2: Add to UNL ────────────────────────────');
+    // expiryMoment not available on initial acquire — only returned on extend.
+    // Expiry tracked locally as createdTimestamp + lifeMoments * 3600 until first extend.
+
+    console.log('\n  ── STEP 2: Register node in cluster ──────────────');
     try {
-        await submitInput(ip, port, { type: 'addNode', pubkey: pub, ip: dom, peerPort: parseInt(peer) });
-        console.log('  ✓ Accepted. Saving node and waiting for UNL update...');
+        const existingNodes = loadNodes().filter(n => stat.currentUnl.includes(n.pubkey)).map(n => ({
+            pubkey: n.pubkey, domain: n.domain, userPort: n.userPort, peerPort: n.peerPort
+        }));
+        await submitInput(ip, port, { type: 'addNode', pubkey: pub, ip: dom, peerPort: parseInt(peer), userPort: parseInt(user), existingNodes });
+        console.log('  ✓ Accepted. Saving node to cluster-nodes.json...');
         const nodes = loadNodes();
-        nodes.push({ pubkey: pub, name, host: extHost, domain: dom, userPort: parseInt(user), peerPort: parseInt(peer), createdTimestamp: ts, lifeMoments: parseInt(moments) });
+        const newRecord = { pubkey: pub, name, host: extHost, domain: dom, userPort: parseInt(user), peerPort: parseInt(peer), createdTimestamp: ts, lifeMoments: parseInt(moments) };
+        nodes.push(newRecord);
         saveNodes(nodes);
         console.log('  ✓ Saved to cluster-nodes.json');
-        const expectedUnl = stat.currentUnl.length + 1;
-        await pollUntil(async () => {
-            const s = await getStatus(ip, port);
-            process.stdout.write(`  UNL: ${s.currentUnl.length}/${expectedUnl} | voteStatus: ${s.voteStatus}\r`);
-            return s.currentUnl.length === expectedUnl && s.voteStatus === 'synced' ? s : null;
-        }, roundtime * 20);
         const finalStat = await getStatus(ip, port);
-        console.log(`\n  ✓ Node added. UNL=${finalStat.currentUnl.length} | Peers: ${finalStat.peers.join(', ')}`);
+        console.log(`  ✓ Node registered. Current UNL=${finalStat.currentUnl.length} | Peers: ${finalStat.peers.join(', ')}`);
+
+        console.log('\n  ── STEP 3: Deploy bundle ─────────────────────────');
+        // Build bundle with all current UNL pubkeys and deploy to new node
+        try {
+            // 1 UNL pubkey + max 2 peers — keeps Xahau memo under 1KB limit.
+            // New node syncs full UNL and peers automatically from first connection.
+            const overrideCfg = {
+                contract: {
+                    unl: [finalStat.currentUnl[0]]
+                },
+                mesh: {
+                    known_peers: loadNodes()
+                        .filter(n => finalStat.currentUnl.includes(n.pubkey) && n.peerPort)
+                        .slice(0, 2)
+                        .map(n => `${n.domain}:${n.peerPort}`)
+                }
+            };
+            const overrideCfgPath = path.join(PROJECT_DIR, 'node-override-temp.cfg');
+            fs.writeFileSync(overrideCfgPath, JSON.stringify(overrideCfg));
+            process.env.EV_HP_OVERRIDE_CFG_PATH = overrideCfgPath;
+
+            // Write cluster.json into dist for new node (deterministic fields only — no LCL values)
+            // Anchor node + new node only — new node discovers full cluster via NPL sync.
+            const anchorNode = loadNodes().find(n => finalStat.currentUnl.includes(n.pubkey));
+            const clusterJson = {
+                initialized: true,
+                nodes: [
+                    ...(anchorNode ? [{
+                        pubkey: anchorNode.pubkey, domain: anchorNode.domain,
+                        userPort: anchorNode.userPort, peerPort: anchorNode.peerPort,
+                        isUnl: true, status: 'active'
+                    }] : []),
+                    {
+                        pubkey: pub, domain: dom,
+                        userPort: parseInt(user), peerPort: parseInt(peer),
+                        isUnl: false, status: 'created',
+                        acknowledgeTries: 0, lastAckSentLcl: 0
+                    }
+                ]
+            };
+            fs.writeFileSync(path.join(TOOL_DIR, 'contract', 'dist', 'cluster.info'), JSON.stringify(clusterJson, null, 2));
+            console.log(`  ✓ cluster.info written (anchor: ${anchorNode?.domain || 'none'} + new node).`);
+            // Rebuild bundle with override cfg (includes full UNL and known_peers)
+            execSync(
+                `${sudo}evdevkit bundle "${path.join(TOOL_DIR, 'contract', 'dist')}" ${pub} /usr/bin/node -a index.js`,
+                { encoding: 'utf8', cwd: PROJECT_DIR, env: process.env }
+            );
+            console.log('  ✓ Bundle rebuilt with peer config.');
+            // Wait for the new node's user port to be ready
+            console.log(`  Waiting for ${dom}:${user} to be ready...`);
+            await pollUntil(async () => {
+                try {
+                    execSync(`nc -zw3 ${dom} ${user} 2>/dev/null`, { encoding: 'utf8' });
+                    return true;
+                } catch { return null; }
+            }, roundtime * 20);
+            console.log(`  ✓ Port ${user} is open.`);
+
+            execSync(
+                `${sudo}evdevkit deploy "${path.join(TOOL_DIR, 'contract', 'bundle', 'bundle.zip')}" ${dom} ${user}`,
+                { encoding: 'utf8', env: process.env }
+            );
+            fs.unlinkSync(overrideCfgPath);
+            delete process.env.EV_HP_OVERRIDE_CFG_PATH;
+            console.log('  ✓ Bundle deployed to new node.');
+
+            // STEP 4 — Wait for contract to auto-promote node to UNL via MATURED flow
+            console.log('\n  ── STEP 4: Waiting for node to mature and join UNL ──');
+            console.log('  (New node will send MATURED signal when synced...)');
+            const expectedUnl = stat.currentUnl.length + 1;
+            await pollUntil(async () => {
+                const s = await getStatus(ip, port);
+                process.stdout.write(`  UNL: ${s.currentUnl.length}/${expectedUnl} | voteStatus: ${s.voteStatus}          \r`);
+                return s.currentUnl.length === expectedUnl && s.voteStatus === 'synced' ? s : null;
+            }, roundtime * 60); // Give up to 60 roundtimes for sync + MATURED flow
+            const promotedStat = await getStatus(ip, port);
+            console.log(`\n  ✓ Node promoted to UNL. UNL=${promotedStat.currentUnl.length}`);
+        } catch(e) {
+            console.error(`  ✗ Bundle deploy failed: ${e.message}`);
+            console.log('  ⚠  Node registered but bundle not deployed. Deploy manually:');
+            console.log(`     evdevkit deploy <bundle.zip> ${dom} ${user}`);
+        }
     } catch(e) { console.error(`\n  ✗ Add node failed: ${e.message}`); }
+    console.log('─────────────────────────────────────────────────────\n');
+};
+
+const opPurgePeers = async (silent = false) => {
+    console.log('\n── Purge Ghost Peers ────────────────────────────────');
+    let stat;
+    try {
+        stat = await getStatus(ip, port);
+        console.log(`  ✓ Connected. UNL=${stat.currentUnl.length}`);
+    } catch(e) { console.error(`  ✗ ${e.message}`); return; }
+
+    const nodes = loadNodes();
+
+    if (!silent) {
+        console.log('\n  This will send a peer_changeset OVERWRITE to ALL nodes,');
+        console.log('  clearing ghost peers from their in-memory peer tables.');
+        console.log('  Ghost peers will be purged FROM these nodes:');
+        nodes.filter(n => stat.currentUnl.includes(n.pubkey)).forEach((n, i) => {
+            console.log(`    [${i}] ${n.pubkey.slice(0,20)}… ${n.domain}`);
+        });
+        console.log('');
+        const confirm = (await askYesNo('  Proceed? (yes/y or Enter to cancel): '));
+        if (confirm !== 'yes' && confirm !== 'y') { console.log('  Cancelled.'); return; }
+    } else {
+        console.log('  Auto-purging ghost peers from all nodes...');
+    }
+
+    const unlNodes = nodes.filter(n => stat.currentUnl.includes(n.pubkey));
+    let purgeOk = 0;
+    for (const node of unlNodes) {
+        try {
+            await Promise.race([
+                submitInput(node.domain, String(node.userPort), { type: 'purgePeers' }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 15000))
+            ]);
+            console.log(`  ✓ Purged: ${node.domain}`);
+            purgeOk++;
+        } catch(e) {
+            console.log(`  ✗ Failed on ${node.domain}: ${e.message}`);
+        }
+    }
+    if (purgeOk < unlNodes.length) {
+        console.log(`\n  ⚠  ${unlNodes.length - purgeOk} node(s) failed — run purge again if ghost connections persist.`);
+    } else {
+        console.log('\n  ✓ Ghost peer purge complete.');
+    }
     console.log('─────────────────────────────────────────────────────\n');
 };
 
@@ -1021,7 +1250,7 @@ const opRemoveNode = async () => {
         const roundtime = parseInt(process.env.HP_ROUNDTIME || 6000);
         await pollUntil(async () => {
             const s = await getStatus(ip, port);
-            process.stdout.write(`  UNL: ${s.currentUnl.length}/${expectedUnl} | voteStatus: ${s.voteStatus}\r`);
+            process.stdout.write(`  UNL: ${s.currentUnl.length}/${expectedUnl} | voteStatus: ${s.voteStatus}          \r`);
             return s.currentUnl.length === expectedUnl && s.voteStatus === 'synced' ? s : null;
         }, roundtime * 20);
         console.log(`\n  ✓ Node removed. UNL=${expectedUnl}`);
@@ -1051,11 +1280,26 @@ const opCheckExpiry = async () => {
         return;
     }
     console.log(`  Current time: ${new Date().toUTCString()}\n`);
-    console.log('  '+hr(90));
-    console.log('  '+'Pubkey'.padEnd(22)+'Domain'.padEnd(25)+'Purchased'.padEnd(11)+'Remaining'.padEnd(12)+'Expires (UTC)');
-    console.log('  '+hr(90));
-    nodes.forEach(n=>{ const tr=timeRemaining(n); console.log('  '+(n.pubkey.slice(0,20)+'…').padEnd(22)+(n.domain||'').slice(0,23).padEnd(25)+(n.lifeMoments+'h total').padEnd(11)+(tr.expired?'⚠  EXPIRED':tr.text).padEnd(12)+new Date(tr.expirySec*1000).toUTCString()); });
-    console.log('  '+hr(90));
+    const nowSec = Math.floor(Date.now() / 1000);
+    console.log('  ' + hr(108));
+    console.log('  ' + 'Node'.padEnd(22) + 'Domain'.padEnd(28) + 'Source'.padEnd(8) + 'Remaining'.padEnd(16) + 'Expires (UTC)');
+    console.log('  ' + hr(108));
+    nodes.forEach(n => {
+        const expirySec = getExpiryTimestamp(n);
+        const remaining = expirySec - nowSec;
+        const h = Math.floor(Math.abs(remaining) / 3600);
+        const m = Math.floor((Math.abs(remaining) % 3600) / 60);
+        const s = Math.abs(remaining) % 60;
+        const remainText = remaining <= 0 ? '⚠  EXPIRED' : `${h}h ${m}m ${s}s`;
+        const source     = n.expiryMoment ? 'chain' : 'local';
+        console.log('  ' + (n.pubkey.slice(0,20)+'…').padEnd(22) + (n.domain||'').slice(0,26).padEnd(28) + source.padEnd(8) + remainText.padEnd(16) + new Date(expirySec * 1000).toUTCString());
+    });
+    console.log('  ' + hr(108));
+    const soonNodes = nodes.filter(n => { const tr = timeRemaining(n); return !tr.expired && tr.remaining < 6 * 3600; });
+    if (soonNodes.length > 0) {
+        console.log(`\n  ⚠  ${soonNodes.length} node(s) expiring within 6 hours:`);
+        soonNodes.forEach(n => { const tr = timeRemaining(n); console.log(`    ${n.domain} — ${tr.text} remaining`); });
+    }
     console.log('─────────────────────────────────────────────────────\n');
 };
 
@@ -1071,21 +1315,64 @@ const opExtendLease = async () => {
     const addMoments=parseInt(momentsStr);
     const targets=input==='all'?nodes:/^\d+$/.test(input)&&parseInt(input)<nodes.length?[nodes[parseInt(input)]]:null;
     if (!targets) { console.error('  ✗ Invalid input.'); return; }
-    console.log('');
-    for (const node of targets) {
-        if (!node.name||!node.host) { console.log(`  ✗ ${node.pubkey.slice(0,20)}… — missing details.`); continue; }
-        process.stdout.write(`  Extending ${node.pubkey.slice(0,20)}… by ${addMoments} moment(s)...`);
-        try {
-            execSync(
-                `${sudo}evdevkit extend-instance ${node.host} ${node.name} -m ${addMoments}`,
-                {encoding:'utf8', env: process.env}
-            );
-            node.lifeMoments+=addMoments;
-            console.log(` ✓ Total: ${node.lifeMoments} moments.`);
-        } catch(e) { console.log(` ✗ ${e.message}`); }
+    console.log(`\n  Connecting to Xahau (${process.env.XAHAU_WS || process.env.EV_XAHAUD_SERVER || 'wss://xahau.network'})...`);
+    let evernodeCtx;
+    try {
+        evernodeCtx = await getEvernodeTenant();
+        console.log('  ✓ Connected.\n');
+    } catch(e) {
+        console.error(`  ✗ Could not connect to Xahau: ${e.message}`);
+        return;
     }
-    saveNodes(nodes);
-    console.log('\n  ✓ cluster-nodes.json updated.');
+
+    const { tenant, xrplApi } = evernodeCtx;
+    const updatedNodes  = loadNodes();
+    let successCount    = 0;
+    let failCount       = 0;
+    const failedDomains = [];
+
+    for (const node of targets) {
+        if (!node.name || !node.host) {
+            console.log(`  ✗ ${node.domain} — missing host/name details, cannot extend.`);
+            failCount++;
+            failedDomains.push(node.domain);
+            continue;
+        }
+        process.stdout.write(`  Extending ${node.domain} by ${addMoments} moment(s)... `);
+        try {
+            const result = await tenant.extendLease(node.host, addMoments, node.name);
+            const record = updatedNodes.find(n => n.pubkey === node.pubkey);
+            if (record) {
+                record.expiryMoment = result.expiryMoment;
+                record.lifeMoments += addMoments;
+                console.log(`✓`);
+                console.log(`    On-chain confirmed | expiryMoment: ${result.expiryMoment} | expires: ${momentToDate(result.expiryMoment)}`);
+            }
+            successCount++;
+        } catch(e) {
+            console.log(`✗`);
+            console.log(`    FAILED — ${e.reason || e.message || JSON.stringify(e)}`);
+            failCount++;
+            failedDomains.push(node.domain);
+        }
+    }
+
+    try { await tenant.disconnect(); } catch {}
+    try { await xrplApi.disconnect(); } catch {}
+
+    if (successCount > 0) saveNodes(updatedNodes);
+
+    console.log('');
+    if (failCount === 0) {
+        console.log(`  ✓ All ${successCount} extension(s) confirmed on-chain. cluster-nodes.json updated.`);
+    } else if (successCount === 0) {
+        console.log(`  ✗ All ${failCount} extension(s) failed. cluster-nodes.json unchanged.`);
+        console.log('    Check your EVR balance and Xahau connection, then try again.');
+    } else {
+        console.log(`  ⚠  ${successCount} succeeded, ${failCount} failed.`);
+        console.log('    Failed nodes were NOT updated. Run extend again to retry:');
+        failedDomains.forEach(d => console.log(`    ✗ ${d}`));
+    }
     console.log('─────────────────────────────────────────────────────\n');
 };
 
@@ -1247,6 +1534,8 @@ const opReadLog = async () => {
     console.log('    4. hp.cfg (config)');
     console.log('    5. patch.cfg (contract override)');
     console.log('    6. env.vars (host environment)');
+    console.log('    7. cluster.json (cluster state)');
+    console.log('    8. authorized_pubkey.txt (authorized key)');
     const logChoice = (await ask('  Choice (default 1): ')).trim() || '1';
     if (logChoice === '5' || logChoice === '6') {
         try {
@@ -1286,6 +1575,31 @@ const opReadLog = async () => {
         } catch(e) { console.error(`  ✗ ${e.message}`); }
         return;
     }
+    if (logChoice === '7' || logChoice === '8') {
+        try {
+            const HP = require('hotpocket-js-client');
+            const kp = await getKeyPair();
+            const client = await HP.createClient([`wss://${nodeInfo.domain}:${nodeInfo.userPort}`], kp, { protocol: HP.protocols.json });
+            const connected = await client.connect();
+            if (!connected) { console.error('  ✗ Connection failed.'); return; }
+            const reqType = logChoice === '7' ? 'readClusterJson' : 'readAuthorizedPubkey';
+            const label   = logChoice === '7' ? 'cluster.json'    : 'authorized_pubkey.txt';
+            const raw = await client.submitContractReadRequest(JSON.stringify({ type: reqType }));
+            await client.close().catch(()=>{});
+            const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            if (p.type === 'error') { console.error(`  ✗ ${p.message}`); return; }
+            console.log(`\n  Node: ${nodeInfo.domain} | ${label} | ${new Date().toISOString()}`);
+            console.log('─'.repeat(80));
+            if (logChoice === '7') {
+                console.log(JSON.stringify(p.data, null, 2));
+            } else {
+                console.log(p.pubkey);
+            }
+            console.log('─────────────────────────────────────────────────────\n');
+        } catch(e) { console.error(`  ✗ ${e.message}`); }
+        return;
+    }
+
     const logType = logChoice === '2' ? 'readContractLog' : logChoice === '3' ? 'readContractLog' : 'readLog';
     const logFile = logChoice === '3' ? 'stderr' : 'stdout';
     const linesStr = (await ask('  Lines to fetch (default 50): ')).trim() || '50';
@@ -1322,6 +1636,23 @@ const opReadLog = async () => {
             process.once('SIGINT', () => { clearInterval(interval); console.log('\n  Stopped.'); resolve(); });
         });
     }
+    console.log('─────────────────────────────────────────────────────\n');
+};
+
+// ── Report Host ──────────────────────────────────────────────
+
+const opReportHost = async () => {
+    console.log('\n── Report a Host ────────────────────────────────────');
+    const nodes = loadNodes();
+    if (nodes.length) {
+        console.log('  Current cluster nodes:');
+        nodes.forEach((n, i) => console.log(`    [${i}] ${n.pubkey.slice(0,20)}… ${n.domain} (${n.host})`));
+        console.log('');
+    }
+    const address = (await ask('  Host Xahau address to report: ')).trim();
+    if (!address) { console.log('  Cancelled.'); return; }
+    const domain = nodes.find(n => n.host === address)?.domain || address;
+    await reportHost(address, domain);
     console.log('─────────────────────────────────────────────────────\n');
 };
 
