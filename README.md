@@ -328,7 +328,7 @@ cd patches && bash apply-patch1.sh
 
 ### Peer port compliance
 
-Not all Evernode hosts have their peer port open to inbound connections from unknown nodes. Some hosts using custom security layers (`INTERNAL_SECURITY=mid`) act as hubs and reject outbound connections from new nodes. The cluster manager mitigates this by using the `getBootstrapPeer` handler to select a known-good peer from the running cluster rather than a random peer from the status output.
+Not all Evernode hosts have their peer port open to inbound connections from unknown nodes. The cluster manager mitigates this by using the `getBootstrapPeer` handler to select a known-good peer from the running cluster rather than a random peer from the status output.
 
 Future versions will integrate peer port compliance data from the Host Discovery API to further improve bootstrap peer selection.
 
