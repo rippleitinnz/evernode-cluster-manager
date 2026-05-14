@@ -2,6 +2,31 @@
 
 ---
 
+## v3.1.2 (2026-05-14)
+
+Source cleanup release — removes unsafe `purgePeers` code path. No functional change to the cluster manager's user-facing operations: `opPurgePeers` was never wired into the menu after v3.1.1 (removed during the May 7 cluster-instability incident).
+
+### cluster-manager.js
+
+- Removed orphan `opPurgePeers` function entirely. Function was unreachable from the menu but still lived in the codebase, calling the dangerous `purgePeers` contract handler. Removing it eliminates the temptation for any future rewire to a menu option.
+- `TOOL_VERSION` bumped to `v3.1.2`.
+- Moved `inspect-peers.js` diagnostic to new `tools/` directory. Standalone read-only script that dumps per-node and aggregate peer state from `hp.cfg`, `patch.cfg`, and live status. Useful for future peer-state investigations.
+
+### npm package (evernode-client-cluster-manager@1.2.2)
+
+- **Removed `purgePeers` handler entirely.** Used hpcore's OVERWRITE mode via `ctx.updatePeers(peers, "*")`. When every UNL node ran this handler in the same consensus round, every node closed all live peer sessions simultaneously, collapsing the cluster. The handler had no safe usage pattern from a multi-node contract. The ghost-peer use case is fully covered by `removeNode` and `removePeer` (since 1.2.1) which use FORCE mode on a single peer at a time — surgical and safe across simultaneous consensus execution.
+- Removed orphan `heartbeat()` function (defined but never called from `init()`).
+- Removed unused `HP_CLIENT_TIMEOUT` and `HEARTBEAT_INTERVAL` constants.
+- Cleaned `/***N;***/` inline comment artefacts on threshold constants.
+- Handler count: 15 → 14 user-facing (9 readonly + 5 consensus). `matured` is consensus but is a node-to-node signal, not a user-facing operation.
+
+### README
+
+- Handler table: removed `purgePeers` row. Updated `removeNode` and `removePeer` rows to reflect their post-1.2.1 behaviour (both now flush `req_known_remotes`).
+- Rewrote the "Ghost peer purge" paragraph as "Ghost peer cleanup (resolved as of npm package 1.2.1)" — describes the FORCE-mode flush mechanism, explains why the OVERWRITE-mode `purgePeers` was removed in 1.2.2, confirms no remaining unsafe peer-cleanup code paths.
+
+---
+
 ## v3.1.1 (2026-05-10)
 
 Bug fixes and display improvements following live 10-node cluster testing.

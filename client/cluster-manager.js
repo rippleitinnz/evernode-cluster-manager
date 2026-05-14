@@ -10,7 +10,7 @@
 
 'use strict';
 
-const TOOL_VERSION = 'v3.1.0';
+const TOOL_VERSION = 'v3.1.2';
 
 const path         = require('path');
 const fs           = require('fs');
@@ -342,7 +342,6 @@ const findHostsViaAPI = async (apiUrl, minSlots, targetCount, minRep, includeUns
 
 // ── Host Finder ───────────────────────────────────────────────
 const findHosts = async (minSlots = 1, targetCount = 20, minRep = 200, includeUnscored = false, allowReport = false) => {
-    // Use local API if configured
     const apiUrl = process.env.HOST_API_URL || 'https://api.onledger.net';
     try {
         console.log('\n  Using host API: ' + apiUrl);
@@ -351,8 +350,18 @@ const findHosts = async (minSlots = 1, targetCount = 20, minRep = 200, includeUn
         console.log('  ⚠  API unavailable (' + e.message + ')');
         return [];
     }
+};
 
-
+// ── Resolve host input — address or list number ───────────────
+// hosts = array returned by findHosts (may be empty if user skipped find step)
+const resolveHostInput = (raw, hosts) => {
+    if (/^\d+$/.test(raw)) {
+        const idx = parseInt(raw) - 1;
+        if (!hosts.length) return { error: 'No host list available — enter a full address.' };
+        if (idx < 0 || idx >= hosts.length) return { error: `Invalid number — enter 1–${hosts.length} or a full address.` };
+        return { address: hosts[idx].address, domain: hosts[idx].domain };
+    }
+    return { address: raw };
 };
 
 // ── Global credentials setup ──────────────────────────────────
@@ -568,16 +577,27 @@ const verifyHosts = async (hostAddrs, requiredSlots = 1) => {
 
 
 // ── Host Selection with live slot verification ────────────────
+// hosts = array from findHosts — allows entering a list number instead of full address.
+// Pass [] if user skipped the find step (number input will be rejected gracefully).
 
-const selectHosts = async (nodeCount) => {
-    console.log(`\n  Enter ${nodeCount} host Xahau address(es).\n`);
+const selectHosts = async (nodeCount, hosts = []) => {
+    const hint = hosts.length
+        ? `Enter address or list number (1–${hosts.length})`
+        : 'Enter host address';
+    console.log(`\n  ${hint}.\n`);
 
     const hostResults = [];
 
     for (let i = 1; i <= nodeCount; i++) {
         while (true) {
-            const addr = (await ask(`  Host ${i}: `)).trim();
-            if (!addr) continue;
+            const raw = (await ask(`  Host ${i}: `)).trim();
+            if (!raw) continue;
+
+            const resolved = resolveHostInput(raw, hosts);
+            if (resolved.error) { console.log('  ✗ ' + resolved.error); continue; }
+
+            const addr = resolved.address;
+            if (resolved.domain) console.log(`  → ${addr} (${resolved.domain})`);
 
             const { results } = await verifyHosts([addr], 1);
             const result = results[0];
@@ -592,7 +612,6 @@ const selectHosts = async (nodeCount) => {
         }
     }
 
-
     // Ensure first host has exactly 1 slot
     while (hostResults[0].available > 1) {
         console.log('\n  ⚠  No single-slot host available — risk of double allocation on same host.');
@@ -606,8 +625,12 @@ const selectHosts = async (nodeCount) => {
         }
         const idx = parseInt(idxStr) - 1;
         if (isNaN(idx) || idx < 0 || idx >= nodeCount) { console.log('  Invalid number.'); continue; }
-        const newAddr = (await ask('  New host address: ')).trim();
-        if (!newAddr) { console.log('  Cancelled.'); return null; }
+        const rawNew = (await ask('  New host (address or list number): ')).trim();
+        if (!rawNew) { console.log('  Cancelled.'); return null; }
+        const resolved = resolveHostInput(rawNew, hosts);
+        if (resolved.error) { console.log('  ✗ ' + resolved.error); continue; }
+        const newAddr = resolved.address;
+        if (resolved.domain) console.log(`  → ${newAddr} (${resolved.domain})`);
         const { results } = await verifyHosts([newAddr], 1);
         const result = results[0];
         if (!result || !result.active) { console.log('  ✗ Host not found or inactive. Try again.'); continue; }
@@ -624,10 +647,12 @@ const selectHosts = async (nodeCount) => {
 const opDeploy = async () => {
     console.log('\n── Deploy New Cluster ───────────────────────────────');
 
+    // ── CHANGE: capture foundHosts so selectHosts can resolve numbers ──
+    let foundHosts = [];
     const findFirst = (await askYesNo('  Find available hosts first? (yes/y or Enter to skip): '));
     if (isYes(findFirst)) {
         const minSlots = parseInt((await ask('  Minimum available slots (default 1): ')).trim()||'1');
-        await findHosts(minSlots, 20);
+        foundHosts = await findHosts(minSlots, 20) || [];
         await ask('  Press Enter to continue...');
     }
 
@@ -639,7 +664,8 @@ const opDeploy = async () => {
         console.log('  Must be >= 3.');
     }
 
-    const hostAddrs = await selectHosts(nodeCount);
+    // ── CHANGE: pass foundHosts through ──
+    const hostAddrs = await selectHosts(nodeCount, foundHosts);
     if (!hostAddrs) { console.log('  Cancelled.'); return false; }
 
     let moments;
@@ -986,13 +1012,27 @@ const opAddNode = async () => {
         console.log(`  ✓ Synced. UNL=${stat.currentUnl.length}`);
     } catch(e) { console.error(`  ✗ ${e.message}`); return; }
 
+    // ── CHANGE: capture foundHosts for number-based selection ──
+    let foundHosts = [];
     const findFirst=(await askYesNo('\n  Find available hosts first? (yes/y or Enter to skip): '));
-    if (isYes(findFirst)) { await findHosts(1,20); await ask('  Press Enter to continue...'); }
+    if (isYes(findFirst)) {
+        foundHosts = await findHosts(1, 20) || [];
+        await ask('  Press Enter to continue...');
+    }
 
     console.log('\n  ── STEP 1: Acquire ───────────────────────────────');
-    const extHost=(await ask('  External host Xahau address: ')).trim();
+    const hint = foundHosts.length ? `address or list number (1–${foundHosts.length})` : 'address';
+    let extHost = '';
+    while (!extHost) {
+        const raw = (await ask(`  External host (${hint}): `)).trim();
+        if (!raw) continue;
+        const resolved = resolveHostInput(raw, foundHosts);
+        if (resolved.error) { console.log('  ✗ ' + resolved.error); continue; }
+        extHost = resolved.address;
+        if (resolved.domain) console.log(`  → ${extHost} (${resolved.domain})`);
+    }
+
     const moments=(await ask(`  Life moments (default ${process.env.DEFAULT_MOMENTS||3}): `)).trim()||(process.env.DEFAULT_MOMENTS||'3');
-    if (!extHost) { console.log('  Cancelled.'); return; }
 
     const { allOk: hostOk } = await verifyHosts([extHost], 1);
     if (hostOk === false) {
@@ -1170,52 +1210,6 @@ const opAddNode = async () => {
     console.log('─────────────────────────────────────────────────────\n');
 };
 
-const opPurgePeers = async (silent = false) => {
-    console.log('\n── Purge Ghost Peers ────────────────────────────────');
-    let stat;
-    try {
-        stat = await getStatus(ip, port);
-        console.log(`  ✓ Connected. UNL=${stat.currentUnl.length}`);
-    } catch(e) { console.error(`  ✗ ${e.message}`); return; }
-
-    const nodes = loadNodes();
-
-    if (!silent) {
-        console.log('\n  This will send a peer_changeset OVERWRITE to ALL nodes,');
-        console.log('  clearing ghost peers from their in-memory peer tables.');
-        console.log('  Ghost peers will be purged FROM these nodes:');
-        nodes.filter(n => stat.currentUnl.includes(n.pubkey)).forEach((n, i) => {
-            console.log(`    [${i}] ${n.pubkey.slice(0,20)}… ${n.domain}`);
-        });
-        console.log('');
-        const confirm = (await askYesNo('  Proceed? (yes/y or Enter to cancel): '));
-        if (confirm !== 'yes' && confirm !== 'y') { console.log('  Cancelled.'); return; }
-    } else {
-        console.log('  Auto-purging ghost peers from all nodes...');
-    }
-
-    const unlNodes = nodes.filter(n => stat.currentUnl.includes(n.pubkey));
-    let purgeOk = 0;
-    for (const node of unlNodes) {
-        try {
-            await Promise.race([
-                submitInput(node.domain, String(node.userPort), { type: 'purgePeers' }),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 15000))
-            ]);
-            console.log(`  ✓ Purged: ${node.domain}`);
-            purgeOk++;
-        } catch(e) {
-            console.log(`  ✗ Failed on ${node.domain}: ${e.message}`);
-        }
-    }
-    if (purgeOk < unlNodes.length) {
-        console.log(`\n  ⚠  ${unlNodes.length - purgeOk} node(s) failed — run purge again if ghost connections persist.`);
-    } else {
-        console.log('\n  ✓ Ghost peer purge complete.');
-    }
-    console.log('─────────────────────────────────────────────────────\n');
-};
-
 const opRemoveNode = async () => {
     console.log('\n── Remove Node ──────────────────────────────────────');
     let stat;
@@ -1307,14 +1301,46 @@ const opExtendLease = async () => {
     console.log('\n── Extend Lease ─────────────────────────────────────');
     const nodes=loadNodes();
     if (!nodes.length) { console.log('  No node records found.'); console.log('─────────────────────────────────────────────────────\n'); return; }
+
+    // Display nodes with index
     nodes.forEach((n,i)=>{ const tr=timeRemaining(n); console.log(`    [${i}] ${n.pubkey.slice(0,20)}… | ${n.domain} | ${tr.text}`); });
-    const input=(await ask('\n  Node index (or "all"): ')).trim();
+
+    // ── CHANGE: support single index, comma-separated indices, or "all" ──
+    console.log('');
+    console.log('  Examples: 0  |  2,5,7  |  all');
+    const input=(await ask('  Node(s) to extend: ')).trim();
     if (!input) { console.log('  Cancelled.'); return; }
+
+    let targets;
+    if (input === 'all') {
+        targets = nodes;
+    } else if (input.includes(',')) {
+        // Comma-separated indices
+        const indices = input.split(',').map(s => parseInt(s.trim()));
+        const invalid = indices.filter(i => isNaN(i) || i < 0 || i >= nodes.length);
+        if (invalid.length) {
+            console.error(`  ✗ Invalid index(es): ${invalid.join(', ')} — valid range is 0–${nodes.length - 1}`);
+            return;
+        }
+        targets = indices.map(i => nodes[i]);
+    } else if (/^\d+$/.test(input)) {
+        const idx = parseInt(input);
+        if (idx < 0 || idx >= nodes.length) { console.error('  ✗ Invalid index.'); return; }
+        targets = [nodes[idx]];
+    } else {
+        console.error('  ✗ Invalid input — enter an index, comma-separated indices, or "all".');
+        return;
+    }
+
+    // Confirm selection
+    console.log(`\n  Selected ${targets.length} node(s):`);
+    targets.forEach(n => console.log(`    ${n.domain}`));
+    console.log('');
+
     const momentsStr=(await ask('  Extend by how many moments: ')).trim();
     if (!momentsStr||isNaN(momentsStr)) { console.log('  Cancelled.'); return; }
     const addMoments=parseInt(momentsStr);
-    const targets=input==='all'?nodes:/^\d+$/.test(input)&&parseInt(input)<nodes.length?[nodes[parseInt(input)]]:null;
-    if (!targets) { console.error('  ✗ Invalid input.'); return; }
+
     console.log(`\n  Connecting to Xahau (${process.env.XAHAU_WS || process.env.EV_XAHAUD_SERVER || 'wss://xahau.network'})...`);
     let evernodeCtx;
     try {

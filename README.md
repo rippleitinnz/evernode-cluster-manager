@@ -32,20 +32,35 @@ The cluster management contract handlers are available as a standalone npm packa
 npm install evernode-client-cluster-manager
 ```
 
+The contract this repo ships with is intentionally tiny — most of the heavy lifting is in the npm package. Below is the actual deployed source (`contract/src/index.js`):
+
 ```js
+'use strict';
+const HotPocket      = require('hotpocket-nodejs-contract');
 const ClusterManager = require('evernode-client-cluster-manager');
-const VERSION = '1.0.0';
+
+const VERSION = '9.2.1';
 
 const contract = async (ctx) => {
     if (await ClusterManager.init(ctx, VERSION)) return;
-    // your business logic here
+    if (ctx.readonly) return;
+    if (ctx.lclSeqNo % 15 === 0) {
+        await ctx.unl.send(JSON.stringify({ type: 'keepalive', lcl: ctx.lclSeqNo }));
+    }
 };
 
 const hpc = new HotPocket.Contract();
 hpc.init(contract);
 ```
 
-See [evernode-client-cluster-manager on npm](https://www.npmjs.com/package/evernode-client-cluster-manager) for full documentation.
+**What this contract does:**
+
+- **`ClusterManager.init(ctx, VERSION)`** — the npm package handles all 14 management input types and the autonomous round logic (MATURED promotion, stale node pruning). If it returns `true` a management input was processed; the contract returns early so business logic is skipped that round.
+- **`if (ctx.readonly) return;`** — readonly requests are answered inside `ClusterManager.init()`; the contract has nothing else to do for those rounds.
+- **Keepalive NPL broadcast every 15 ledgers** — `ctx.unl.send()` pushes an empty NPL message through the Node Protocol Layer. This forces regular peer-to-peer traffic via the consensus channel even when there's no business logic activity. Useful for diagnostic visibility (NPL packets appear in `hp.log` and confirm peer responsiveness) and for ensuring the consensus engine keeps observable activity on otherwise-idle clusters. At the default 8-second roundtime this fires every ~2 minutes. Harmless to remove if your contract has continuous activity from another source.
+- **`VERSION`** — the string `opUpdateContract` polls to confirm an upgrade succeeded. Bump it on every change so the cluster manager can verify deployment.
+
+See [evernode-client-cluster-manager on npm](https://www.npmjs.com/package/evernode-client-cluster-manager) for the package's full handler documentation.
 
 ## Quick Start
 
@@ -159,9 +174,8 @@ The `evdevkit cluster-create` command has a known chunk-size bug that can assign
 | `readAuthorizedPubkey` | readonly | Returns authorized_pubkey.txt — management key |
 | `upgrade` | consensus | Handles contract bundle upgrade via post_exec.sh |
 | `addNode` | consensus | Registers new node as non-UNL pending MATURED |
-| `removeNode` | consensus | Removes node from UNL and cluster state |
-| `removePeer` | consensus | Removes stale peer from patch.cfg |
-| `purgePeers` | consensus | OVERWRITE clears in-memory peer table to current UNL |
+| `removeNode` | consensus | Removes node from UNL and cluster state, cleans patch.cfg, flushes hpcore req_known_remotes |
+| `removePeer` | consensus | Removes stale peer from patch.cfg and flushes from req_known_remotes — manual cleanup for orphan entries |
 | `matured` | consensus | Receives MATURED signal from new non-UNL node |
 
 ## Autonomous Contract Behaviour
@@ -243,7 +257,7 @@ evernode-cluster-manager/
 
 **Adding nodes:** The new node receives a minimal bootstrap config (1 peer, 1 UNL key) at acquire time. It syncs full cluster state automatically from its first peer connection via HotPocket's built-in sync mechanism.
 
-**Ghost peer purge:** When a node is removed, its peer address is cleaned from `patch.cfg` via the `removePeer` handler. In-memory peer table cleanup via `purgePeers` (OVERWRITE mode) is available as a manual operation under research — it is not auto-fired as simultaneous OVERWRITE across all nodes can disrupt consensus.
+**Ghost peer cleanup (resolved as of npm package 1.2.1):** When a node is removed via `opRemoveNode`, the contract atomically cleans three layers on every UNL node: the UNL itself, `patch.cfg.known_peers`, and hpcore's in-memory `req_known_remotes` retry queue. The req_known_remotes flush uses `ctx.updatePeers([], [peerStr])` which routes through hpcore's FORCE-mode update path — surgical, removes only the named peer, safe to fire simultaneously across all UNL nodes during the consensus round. The earlier `purgePeers` handler (OVERWRITE mode via `ctx.updatePeers(peers, "*")`) was removed in npm 1.2.2: it cleared the entire peer table and closed all live sessions, which collapsed the cluster when every UNL node ran it simultaneously. There is no remaining unsafe code path for peer cleanup.
 
 **Vote status:** `synced` = healthy consensus. In HP debug logs `Vote status: 3` is the synced state code.
 
