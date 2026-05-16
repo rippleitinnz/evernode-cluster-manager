@@ -72,6 +72,84 @@ node client/cluster-manager.js
 
 On first run the tool prompts for credentials and creates your first project. `HOST_API_URL=https://api.onledger.net` is written to your global credentials file automatically.
 
+## Using Your Own Contract
+
+When creating a project, the tool prompts:
+
+```
+── Contract Source ───────────────────────────────────
+  1. Use default cluster management contract (recommended)
+  2. Use my own contract directory
+```
+
+### Option 1 — Default contract
+
+Pick this and the tool uses the contract shipped in `contract/dist/`. Nothing else to do — proceed straight to deployment. Use this when you only need the cluster management features (status, log access, node add/remove, live upgrades) without custom business logic.
+
+### Option 2 — Your own contract
+
+Point the tool at any directory containing your contract files. The directory must contain:
+
+```
+my-contract/
+├── package.json     ← must declare evernode-client-cluster-manager as a dependency
+└── index.js         ← must require it and call ClusterManager.init() first
+```
+
+**Required `package.json`:**
+
+```json
+{
+  "name": "my-contract",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "hotpocket-nodejs-contract": "0.7.4",
+    "evernode-client-cluster-manager": "^1.2.2"
+  }
+}
+```
+
+**Required `index.js` skeleton:**
+
+```js
+'use strict';
+const HotPocket      = require('hotpocket-nodejs-contract');
+const ClusterManager = require('evernode-client-cluster-manager');
+
+const VERSION = '1.0.0';
+
+const contract = async (ctx) => {
+    if (await ClusterManager.init(ctx, VERSION)) return;
+    if (ctx.readonly) return;
+
+    // Your business logic here
+};
+
+const hpc = new HotPocket.Contract();
+hpc.init(contract);
+```
+
+**What the tool does when you pick option 2:**
+
+1. Copies every **top-level file** from your directory into the project's `contract/` folder. Subdirectories and `node_modules` are skipped.
+2. Runs `npm install --prefix <project>/contract` to install your declared dependencies.
+3. Overwrites `node_modules/evernode-client-cluster-manager` with the ncc-bundled copy from the tool's own `contract/dist/`. This guarantees the deployed handler code matches what the CLI was tested against — your declared version in `package.json` only needs to exist for npm to populate `node_modules/`, the actual bytes get replaced.
+4. If `index.js` contains `const CONTRACT_VERSION = '...'`, the tool updates it to the version you entered at project setup.
+
+**Constraints:**
+
+- **Flat layout only.** The CLI does not recursively copy subdirectories. Keep all contract source files at the top level. If you need to factor code, do it as multiple `.js` files alongside `index.js`, not as a folder tree.
+- **Your `package.json` must declare `evernode-client-cluster-manager`.** Without it, `npm install` creates no `node_modules/` directory, and `ensureNccBundle` has nowhere to write — the deploy will fail.
+- **Run `npm init -y` before `npm install` when building a fresh contract directory from scratch.** Without a `package.json` in the directory, npm walks up to a parent and silently installs nothing.
+
+### Critical rules for any custom contract
+
+- **Call `ClusterManager.init()` first.** It handles all management inputs and the autonomous round logic. If it returns `true`, a management input was processed — your business logic must not run that round.
+- **No non-deterministic values in outputs.** Never use `new Date()`, `Math.random()`, or any value that differs between nodes. All nodes must produce identical output for consensus.
+- **Keep a `VERSION` constant** and pass it to `ClusterManager.init()`. The CLI's `Update contract` flow polls this string to confirm deployment succeeded.
+- **Readonly handlers belong inside the `ctx.readonly` block.** `ClusterManager.init()` handles its own readonly handlers internally — any of your own readonly handlers must check `ctx.readonly` and run in that path.
+
 ## Management Menu
 
 ```
@@ -229,7 +307,7 @@ Evernode moment constants (mainnet, stable as of May 2026):
 
 `expiryMoment` is populated after the first confirmed on-chain extension. Before that, expiry is calculated from `createdTimestamp + lifeMoments × 3600`.
 
-## Contract Structure
+## Repository Structure
 
 ```
 evernode-cluster-manager/
@@ -282,48 +360,6 @@ XAHAU_WS=ws://localhost:6008
 
 `XAHAU_WS` is used for host slot verification before committing a lease payment, and for lease extension transactions.
 
-## Using Your Own Contract
-
-You can deploy and manage your own contract using the cluster manager. The only requirement is that your contract includes the cluster management npm package:
-
-```bash
-npm install evernode-client-cluster-manager
-```
-
-```js
-'use strict';
-const HotPocket      = require('hotpocket-nodejs-contract');
-const ClusterManager = require('evernode-client-cluster-manager');
-const VERSION        = '1.0.0';
-
-const contract = async (ctx) => {
-    if (await ClusterManager.init(ctx, VERSION)) return;
-
-    // Your business logic here
-    if (ctx.readonly) return;
-
-    for (const user of ctx.users.list()) {
-        for (const input of user.inputs) {
-            const buf = await ctx.users.read(input);
-            const msg = JSON.parse(buf.toString());
-            if (msg.type === 'myAction') {
-                await user.send(JSON.stringify({ type: 'myAction', status: 'ok' }));
-            }
-        }
-    }
-};
-
-const hpc = new HotPocket.Contract();
-hpc.init(contract);
-```
-
-### Critical rules
-
-- **Call `ClusterManager.init()` first** — it handles all management inputs and autonomous round logic. If it returns `true` a management input was processed and your code should not run.
-- **No non-deterministic values in outputs** — never use `new Date()`, `Math.random()` or any value that differs between nodes. All nodes must produce identical output for consensus.
-- **Version constant required** — keep a version string and pass it to `ClusterManager.init()` so the cluster manager can confirm upgrades succeeded.
-- **Readonly handlers** — any handler you want callable without consensus must be placed in the `ctx.readonly` block. `ClusterManager.init()` handles this automatically for its own handlers.
-
 ## Known Issues
 
 ### evdevkit cluster-create host deduplication bug
@@ -354,4 +390,4 @@ Future versions will integrate peer port compliance data from the Host Discovery
 - Minimum viable cluster size is 3 nodes
 - Backups of contract state are created automatically before each upgrade (last 5 kept)
 - If an upgrade fails, `post_exec.sh` automatically rolls back `patch.cfg`
-- When managing large clusters (7+ nodes), stagger lease expiry times to prevent simultaneous expiry destroying consensus
+- When managing large clusters (7+ nodes), stagger lease expiry times to protect consensus against simultaneous node loss
