@@ -1171,17 +1171,17 @@ const opAddNode = async () => {
             fs.writeFileSync(overrideCfgPath, JSON.stringify(overrideCfg));
             process.env.EV_HP_OVERRIDE_CFG_PATH = overrideCfgPath;
 
-            // Write cluster.json into dist for new node (deterministic fields only — no LCL values)
-            // Anchor node + new node only — new node discovers full cluster via NPL sync.
-            const anchorNode = loadNodes().find(n => finalStat.currentUnl.includes(n.pubkey));
+            // Write cluster.info into dist for new node — full UNL peer list so new node
+            // has multiple peers to try when sending MATURED. No memo size constraint here.
+            const unlNodes = loadNodes().filter(n => finalStat.currentUnl.includes(n.pubkey) && n.domain && n.peerPort);
             const clusterJson = {
                 initialized: true,
                 nodes: [
-                    ...(anchorNode ? [{
-                        pubkey: anchorNode.pubkey, domain: anchorNode.domain,
-                        userPort: anchorNode.userPort, peerPort: anchorNode.peerPort,
+                    ...unlNodes.map(n => ({
+                        pubkey: n.pubkey, domain: n.domain,
+                        userPort: n.userPort, peerPort: n.peerPort,
                         isUnl: true, status: 'active'
-                    }] : []),
+                    })),
                     {
                         pubkey: pub, domain: dom,
                         userPort: parseInt(user), peerPort: parseInt(peer),
@@ -1191,7 +1191,7 @@ const opAddNode = async () => {
                 ]
             };
             fs.writeFileSync(path.join(TOOL_DIR, 'contract', 'dist', 'cluster.info'), JSON.stringify(clusterJson, null, 2));
-            console.log(`  ✓ cluster.info written (anchor: ${anchorNode?.domain || 'none'} + new node).`);
+            console.log(`  ✓ cluster.info written (${unlNodes.length} UNL nodes + new node).`);
             // Rebuild bundle with override cfg (includes full UNL and known_peers)
             execSync(
                 `${sudo}evdevkit bundle "${path.join(TOOL_DIR, 'contract', 'dist')}" ${pub} /usr/bin/node -a index.js`,
