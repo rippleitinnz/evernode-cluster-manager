@@ -2,6 +2,43 @@
 
 ---
 
+## v3.2.0 (2026-05-19)
+
+### cluster-manager.js
+
+**Bootstrap peer selection**
+- `opAddNode` now displays all available peers before acquire and allows the user to select a different bootstrap peer. Previously the cluster-selected peer was used silently with no visibility or override. The recommended peer is highlighted; pressing Enter accepts it.
+
+**Poll condition fix**
+- `opAddNode` step 4 now polls for `UNL >= expectedUnl` instead of `UNL === expectedUnl`. Previously if multiple pending nodes were promoted simultaneously the UNL count would jump past the expected value and the poll would never resolve, always timing out.
+
+**Error message fix**
+- Timeout in step 4 now correctly reports "Timed out waiting for node to join UNL" instead of the misleading "Bundle deploy failed".
+
+**Blake3 warning suppressed**
+- All `npm install` calls now pass `BLAKE3_FORCE_WASM=1` in the environment, suppressing the native binding download warning on every install.
+
+**`cluster.info` fixes**
+- `opDeploy` now deletes stale `cluster.info` from `contract/dist/` before bundling. Previously a `cluster.info` written by a prior `opAddNode` run could be bundled into a fresh cluster deploy, giving every new node stale peer data from a previous cluster.
+- `opAddNode` now writes all current UNL nodes to `cluster.info` instead of just one anchor node. No memo size constraint applies — `cluster.info` is a bundle file. Gives new nodes multiple peers to try when connecting.
+
+**`TOOL_VERSION`** bumped to `v3.2.0`.
+
+### npm package (evernode-client-cluster-manager@1.3.0)
+
+- MATURED flow fixed — `hotpocket-js-client` moved to top-level static require so ncc bundles it correctly
+- Full peer mesh maintenance via `patch.cfg` `mesh.known_peers` using `ctx.updateConfig()`
+- `cluster.info` written with full UNL peer list
+- `checkAndPromoteMatured` updates full peer list via `ctx.updatePeers` after promotion
+
+See [npm package CHANGELOG](https://github.com/rippleitinnz/evernode-client-cluster-manager/blob/main/CHANGELOG.md) for full details.
+
+### contract/src/index.js
+
+- Version reset to `1.2.0`.
+
+---
+
 ## v3.1.2 (2026-05-14)
 
 Source cleanup release — removes unsafe `purgePeers` code path. No functional change to the cluster manager's user-facing operations: `opPurgePeers` was never wired into the menu after v3.1.1 (removed during the May 7 cluster-instability incident).
@@ -42,10 +79,8 @@ Bug fixes and display improvements following live 10-node cluster testing.
 **Display fixes**
 - Node health display — removed `weaklyConnected: false` noise. Now only shows warning when `weaklyConnected: true`.
 - Node health display — LCL hash mismatch indicator (`✗ HASH MISMATCH`) only shown when there is an actual mismatch. Previously showed `✗` on every node regardless of hash state.
-- Version poll — added padding to `
-` output to prevent leftover characters (e.g. `9.1.1wn`).
-- UNL poll — added padding to `
-` output to prevent `syncedd` double-character artifact.
+- Version poll — added padding to `\r` output to prevent leftover characters (e.g. `9.1.1wn`).
+- UNL poll — added padding to `\r` output to prevent `syncedd` double-character artifact.
 - `checkClusterHealth` — added 10-second `Promise.race` timeout per node. Previously hung indefinitely on nodes that were slow to respond during contract upgrades.
 
 **Log reader additions (option 8)**

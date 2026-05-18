@@ -10,7 +10,7 @@
 
 'use strict';
 
-const TOOL_VERSION = 'v3.2.0';
+const TOOL_VERSION = 'v3.1.2';
 
 const path         = require('path');
 const fs           = require('fs');
@@ -517,7 +517,7 @@ ALERT_MIN_MOMENTS=12
         }
         if (changed) fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
         console.log('\n  Installing contract dependencies...');
-        execSync(`npm install --prefix ${CONTRACT_DIR} --silent`, { env: { ...process.env, BLAKE3_FORCE_WASM: '1' } });
+        execSync(`npm install --prefix ${CONTRACT_DIR} --silent`);
         ensureNccBundle(`${CONTRACT_DIR}/node_modules`);
         console.log('  ✓ Done');
     }
@@ -715,7 +715,7 @@ const opDeploy = async () => {
     const pkgJson = path.join(CONTRACT_DIR, 'package.json');
     const hasDeps = fs.existsSync(pkgJson) && Object.keys(JSON.parse(fs.readFileSync(pkgJson,'utf8')).dependencies || {}).length > 0;
     if (hasDeps) {
-        execSync(`npm install --prefix ${CONTRACT_DIR} --silent`, { env: { ...process.env, BLAKE3_FORCE_WASM: '1' } });
+        execSync(`npm install --prefix ${CONTRACT_DIR} --silent`);
         ensureNccBundle(`${CONTRACT_DIR}/node_modules`);
     }
     console.log('      ✓ Done.');
@@ -911,7 +911,7 @@ const opStatus = async () => {
                                     await pollUntil(async () => {
                                         const s = await getStatus(ip, port);
                                         process.stdout.write(`  UNL: ${s.currentUnl.length}/${expectedUnl} | voteStatus: ${s.voteStatus}          \r`);
-                                        return s.currentUnl.length >= expectedUnl && s.voteStatus === 'synced' ? s : null;
+                                        return s.currentUnl.length === expectedUnl && s.voteStatus === 'synced' ? s : null;
                                     }, roundtime * 20);
                                     console.log(`\n  ✓ Cluster repaired. UNL=${expectedUnl}`);
                                 } catch(e) { console.error(`  ✗ Failed to remove dead node: ${e.message}`); }
@@ -1046,45 +1046,90 @@ const opAddNode = async () => {
     const logLevel = process.env.HP_LOG_LEVEL||'dbg';
     // Ask cluster which node is best for bootstrapping — cluster has ground truth
     // on peer connectivity. Falls back to stat.peers[0] if unavailable.
-    let bootstrapPeer = null;
-    try {
-        const HP2 = require('hotpocket-js-client');
-        const kp2 = await getKeyPair();
-        const bpClient = await HP2.createClient([`wss://${ip}:${port}`], kp2, { protocol: HP2.protocols.json });
-        const bpConnected = await bpClient.connect();
-        if (bpConnected) {
-            const raw = await bpClient.submitContractReadRequest(JSON.stringify({ type: 'getBootstrapPeer' }));
-            await bpClient.close().catch(() => {});
-            const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
-            if (p && p.domain && p.peerPort) {
-                bootstrapPeer = `${p.domain}:${p.peerPort}`;
-            }
-        }
-    } catch(e) {
-        console.log(`  ⚠  Could not get bootstrap peer from cluster: ${e.message}`);
-    }
-    if (!bootstrapPeer) {
-        bootstrapPeer = stat.peers.length > 0 ? stat.peers[0] : `${ip}:${parseInt(port)-1}`;
-    }
+    // Bootstrap peer selection — must pick a node that is CURRENT with the cluster,
+    // not just TCP-reachable. A stale node (lagging by hundreds of ledgers) is a worse
+    // bootstrap than no node at all, because the new node would sync to stale state.
+    //
+    // Strategy:
+    //   1. Poll every UNL node for LCL via checkClusterHealth().
+    //   2. Identify the cluster's current LCL (max across reachable nodes).
+    //   3. Build a healthy set: reachable + within MAX_LCL_DRIFT of current + has peerPort.
+    //   4. Get contract's recommendation; use it only if it's in the healthy set.
+    //   5. Otherwise pick the first healthy peer, preferring original deploy nodes
+    //      (those in cluster-nodes.json without an addedToUnlOnLcl marker — proxied
+    //      here by checking the local nodes list which doesn't carry that field, so
+    //      we just use first-healthy).
+    //   6. Hard fail if no healthy peer found — better to abort than bootstrap badly.
 
-    // Show available peers and allow user to override bootstrap selection
-    const availablePeers = stat.peers.length > 0 ? stat.peers : [bootstrapPeer];
-    console.log('\n  ── Bootstrap Peer Selection ─────────────────────────────');
-    availablePeers.forEach((p, i) => {
-        const marker = p === bootstrapPeer ? ' (recommended)' : '';
-        console.log(`    ${i + 1}. ${p}${marker}`);
-    });
-    console.log('');
-    const bpInput = (await ask(`  Select peer (1-${availablePeers.length}) or Enter to accept recommended: `)).trim();
-    if (bpInput) {
-        const bpIdx = parseInt(bpInput) - 1;
-        if (!isNaN(bpIdx) && bpIdx >= 0 && bpIdx < availablePeers.length) {
-            bootstrapPeer = availablePeers[bpIdx];
+    const MAX_LCL_DRIFT = 5;
+    let bootstrapPeer = null;
+
+    // Manual override still supported for emergency operator control.
+    if (process.env.BOOTSTRAP_PEER_OVERRIDE) {
+        bootstrapPeer = process.env.BOOTSTRAP_PEER_OVERRIDE;
+        console.log(`  ✓ Bootstrap peer override (env): ${bootstrapPeer}`);
+    } else {
+        console.log('  Probing cluster health to identify current peers...');
+        const trackedNodes = loadNodes().filter(n => stat.currentUnl.includes(n.pubkey));
+        const health = await checkClusterHealth(trackedNodes);
+
+        if (!health || health.reachable.length === 0) {
+            console.error('  ✗ Could not reach any UNL node — aborting add.');
+            return;
+        }
+
+        // Cluster's current LCL = max across reachable nodes.
+        const clusterLcl = Math.max(...health.reachable.map(r => r.lcl.ledgerSeqNo));
+        console.log(`  Cluster current LCL: ${clusterLcl}`);
+
+        // Healthy set: reachable, within drift, has peerPort, has domain.
+        const healthySet = health.reachable
+            .filter(r => !r.weaklyConnected)
+            .filter(r => (clusterLcl - r.lcl.ledgerSeqNo) <= MAX_LCL_DRIFT)
+            .filter(r => r.node.domain && r.node.peerPort)
+            .map(r => ({
+                addr: `${r.node.domain}:${r.node.peerPort}`,
+                pubkey: r.node.pubkey,
+                lcl: r.lcl.ledgerSeqNo,
+            }));
+
+        if (healthySet.length === 0) {
+            console.error('  ✗ No healthy bootstrap peer found (all UNL nodes are stale or weakly connected).');
+            console.error(`     Cluster LCL: ${clusterLcl}, drift tolerance: ${MAX_LCL_DRIFT}`);
+            return;
+        }
+
+        const healthyAddrs = healthySet.map(h => h.addr);
+        console.log(`  Healthy candidates (${healthySet.length}): ${healthyAddrs.join(', ')}`);
+
+        // Ask the contract for its preferred bootstrap peer.
+        let contractRec = null;
+        try {
+            const HP2 = require('hotpocket-js-client');
+            const kp2 = await getKeyPair();
+            const bpClient = await HP2.createClient([`wss://${ip}:${port}`], kp2, { protocol: HP2.protocols.json });
+            if (await bpClient.connect()) {
+                const raw = await bpClient.submitContractReadRequest(JSON.stringify({ type: 'getBootstrapPeer' }));
+                await bpClient.close().catch(() => {});
+                const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+                if (p && p.domain && p.peerPort) contractRec = `${p.domain}:${p.peerPort}`;
+            }
+        } catch(e) {
+            console.log(`  ⚠  Could not get bootstrap peer from cluster: ${e.message}`);
+        }
+
+        // Use contract's recommendation if healthy, otherwise pick first healthy peer.
+        if (contractRec && healthyAddrs.includes(contractRec)) {
+            bootstrapPeer = contractRec;
+            console.log(`  ✓ Bootstrap peer (contract recommendation, verified healthy): ${bootstrapPeer}`);
         } else {
-            console.log('  Invalid selection — using recommended peer.');
+            bootstrapPeer = healthySet[0].addr;
+            if (contractRec) {
+                console.log(`  ⚠  Contract recommended ${contractRec} but it's stale — using healthy peer instead`);
+            }
+            console.log(`  ✓ Bootstrap peer (first healthy): ${bootstrapPeer}`);
         }
     }
-    console.log(`  ✓ Bootstrap peer: ${bootstrapPeer}`);
 
     // initCfg goes into Xahau memo — 1 peer only to stay under 1KB limit.
     const initCfg = {
@@ -1164,15 +1209,28 @@ const opAddNode = async () => {
 
             // Write cluster.json into dist for new node (deterministic fields only — no LCL values)
             // Anchor node + new node only — new node discovers full cluster via NPL sync.
-            const anchorNode = loadNodes().find(n => finalStat.currentUnl.includes(n.pubkey));
+            // FULL_UNL_CLUSTER_INFO_PATCH_v1
+            // Write cluster.info with the FULL current UNL plus the new node.
+            //
+            // The new node reads this on first boot. checkAndSendMatured uses it to
+            // enumerate UNL members and call ctx.updatePeers(peerList). hpcore accepts
+            // this via the peer_changeset control message path (no UNL gate on the
+            // receiver — verified in hpcore sc.cpp:1146 handle_control_msg). Without
+            // the full UNL here, the new node's peer list never expands past whatever
+            // seed peer was in its initCfg memo — silent single-peer orphan when
+            // peer_discovery is off (the required default per Evernode docs).
+            const unlNodes = loadNodes().filter(n => finalStat.currentUnl.includes(n.pubkey));
             const clusterJson = {
                 initialized: true,
                 nodes: [
-                    ...(anchorNode ? [{
-                        pubkey: anchorNode.pubkey, domain: anchorNode.domain,
-                        userPort: anchorNode.userPort, peerPort: anchorNode.peerPort,
-                        isUnl: true, status: 'active'
-                    }] : []),
+                    ...unlNodes.map(n => ({
+                        pubkey: n.pubkey,
+                        domain: n.domain,
+                        userPort: n.userPort,
+                        peerPort: n.peerPort,
+                        isUnl: true,
+                        status: 'active'
+                    })),
                     {
                         pubkey: pub, domain: dom,
                         userPort: parseInt(user), peerPort: parseInt(peer),
@@ -1182,7 +1240,7 @@ const opAddNode = async () => {
                 ]
             };
             fs.writeFileSync(path.join(TOOL_DIR, 'contract', 'dist', 'cluster.info'), JSON.stringify(clusterJson, null, 2));
-            console.log(`  ✓ cluster.info written (anchor: ${anchorNode?.domain || 'none'} + new node).`);
+            console.log(`  ✓ cluster.info written (${unlNodes.length} UNL nodes + new node).`);
             // Rebuild bundle with override cfg (includes full UNL and known_peers)
             execSync(
                 `${sudo}evdevkit bundle "${path.join(TOOL_DIR, 'contract', 'dist')}" ${pub} /usr/bin/node -a index.js`,
@@ -1214,19 +1272,14 @@ const opAddNode = async () => {
             await pollUntil(async () => {
                 const s = await getStatus(ip, port);
                 process.stdout.write(`  UNL: ${s.currentUnl.length}/${expectedUnl} | voteStatus: ${s.voteStatus}          \r`);
-                return s.currentUnl.length >= expectedUnl && s.voteStatus === 'synced' ? s : null;
+                return s.currentUnl.length === expectedUnl && s.voteStatus === 'synced' ? s : null;
             }, roundtime * 60); // Give up to 60 roundtimes for sync + MATURED flow
             const promotedStat = await getStatus(ip, port);
             console.log(`\n  ✓ Node promoted to UNL. UNL=${promotedStat.currentUnl.length}`);
         } catch(e) {
-            if (e.message && e.message.includes('Timed out')) {
-                console.log(`\n  ⚠  Timed out waiting for node to join UNL.`);
-                console.log('  The node may still be syncing. Check status in a moment.');
-            } else {
-                console.error(`  ✗ Bundle deploy failed: ${e.message}`);
-                console.log('  ⚠  Node registered but bundle not deployed. Deploy manually:');
-                console.log(`     evdevkit deploy <bundle.zip> ${dom} ${user}`);
-            }
+            console.error(`  ✗ Bundle deploy failed: ${e.message}`);
+            console.log('  ⚠  Node registered but bundle not deployed. Deploy manually:');
+            console.log(`     evdevkit deploy <bundle.zip> ${dom} ${user}`);
         }
     } catch(e) { console.error(`\n  ✗ Add node failed: ${e.message}`); }
     console.log('─────────────────────────────────────────────────────\n');
@@ -1267,7 +1320,7 @@ const opRemoveNode = async () => {
         await pollUntil(async () => {
             const s = await getStatus(ip, port);
             process.stdout.write(`  UNL: ${s.currentUnl.length}/${expectedUnl} | voteStatus: ${s.voteStatus}          \r`);
-            return s.currentUnl.length >= expectedUnl && s.voteStatus === 'synced' ? s : null;
+            return s.currentUnl.length === expectedUnl && s.voteStatus === 'synced' ? s : null;
         }, roundtime * 20);
         console.log(`\n  ✓ Node removed. UNL=${expectedUnl}`);
         // Clean up stale peer connection
@@ -1768,7 +1821,7 @@ const main = async () => {
     const clientNodeModules = path.join(TOOL_DIR, 'client', 'node_modules');
     if (!fs.existsSync(clientNodeModules)) {
         console.log('\n  Installing dependencies...');
-        execSync(`npm install --prefix ${path.join(TOOL_DIR, 'client')} --silent`, { env: { ...process.env, BLAKE3_FORCE_WASM: '1' } });
+        execSync(`npm install --prefix ${path.join(TOOL_DIR, 'client')} --silent`);
         console.log('  ✓ Done\n');
     }
 

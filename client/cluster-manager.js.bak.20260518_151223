@@ -10,7 +10,7 @@
 
 'use strict';
 
-const TOOL_VERSION = 'v3.2.0';
+const TOOL_VERSION = 'v3.1.2';
 
 const path         = require('path');
 const fs           = require('fs');
@@ -517,7 +517,7 @@ ALERT_MIN_MOMENTS=12
         }
         if (changed) fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
         console.log('\n  Installing contract dependencies...');
-        execSync(`npm install --prefix ${CONTRACT_DIR} --silent`, { env: { ...process.env, BLAKE3_FORCE_WASM: '1' } });
+        execSync(`npm install --prefix ${CONTRACT_DIR} --silent`);
         ensureNccBundle(`${CONTRACT_DIR}/node_modules`);
         console.log('  ✓ Done');
     }
@@ -715,7 +715,7 @@ const opDeploy = async () => {
     const pkgJson = path.join(CONTRACT_DIR, 'package.json');
     const hasDeps = fs.existsSync(pkgJson) && Object.keys(JSON.parse(fs.readFileSync(pkgJson,'utf8')).dependencies || {}).length > 0;
     if (hasDeps) {
-        execSync(`npm install --prefix ${CONTRACT_DIR} --silent`, { env: { ...process.env, BLAKE3_FORCE_WASM: '1' } });
+        execSync(`npm install --prefix ${CONTRACT_DIR} --silent`);
         ensureNccBundle(`${CONTRACT_DIR}/node_modules`);
     }
     console.log('      ✓ Done.');
@@ -911,7 +911,7 @@ const opStatus = async () => {
                                     await pollUntil(async () => {
                                         const s = await getStatus(ip, port);
                                         process.stdout.write(`  UNL: ${s.currentUnl.length}/${expectedUnl} | voteStatus: ${s.voteStatus}          \r`);
-                                        return s.currentUnl.length >= expectedUnl && s.voteStatus === 'synced' ? s : null;
+                                        return s.currentUnl.length === expectedUnl && s.voteStatus === 'synced' ? s : null;
                                     }, roundtime * 20);
                                     console.log(`\n  ✓ Cluster repaired. UNL=${expectedUnl}`);
                                 } catch(e) { console.error(`  ✗ Failed to remove dead node: ${e.message}`); }
@@ -1058,6 +1058,7 @@ const opAddNode = async () => {
             const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
             if (p && p.domain && p.peerPort) {
                 bootstrapPeer = `${p.domain}:${p.peerPort}`;
+                console.log(`  ✓ Bootstrap peer selected by cluster: ${bootstrapPeer}`);
             }
         }
     } catch(e) {
@@ -1065,26 +1066,8 @@ const opAddNode = async () => {
     }
     if (!bootstrapPeer) {
         bootstrapPeer = stat.peers.length > 0 ? stat.peers[0] : `${ip}:${parseInt(port)-1}`;
+        console.log(`  ⚠  Using fallback bootstrap peer: ${bootstrapPeer}`);
     }
-
-    // Show available peers and allow user to override bootstrap selection
-    const availablePeers = stat.peers.length > 0 ? stat.peers : [bootstrapPeer];
-    console.log('\n  ── Bootstrap Peer Selection ─────────────────────────────');
-    availablePeers.forEach((p, i) => {
-        const marker = p === bootstrapPeer ? ' (recommended)' : '';
-        console.log(`    ${i + 1}. ${p}${marker}`);
-    });
-    console.log('');
-    const bpInput = (await ask(`  Select peer (1-${availablePeers.length}) or Enter to accept recommended: `)).trim();
-    if (bpInput) {
-        const bpIdx = parseInt(bpInput) - 1;
-        if (!isNaN(bpIdx) && bpIdx >= 0 && bpIdx < availablePeers.length) {
-            bootstrapPeer = availablePeers[bpIdx];
-        } else {
-            console.log('  Invalid selection — using recommended peer.');
-        }
-    }
-    console.log(`  ✓ Bootstrap peer: ${bootstrapPeer}`);
 
     // initCfg goes into Xahau memo — 1 peer only to stay under 1KB limit.
     const initCfg = {
@@ -1214,19 +1197,14 @@ const opAddNode = async () => {
             await pollUntil(async () => {
                 const s = await getStatus(ip, port);
                 process.stdout.write(`  UNL: ${s.currentUnl.length}/${expectedUnl} | voteStatus: ${s.voteStatus}          \r`);
-                return s.currentUnl.length >= expectedUnl && s.voteStatus === 'synced' ? s : null;
+                return s.currentUnl.length === expectedUnl && s.voteStatus === 'synced' ? s : null;
             }, roundtime * 60); // Give up to 60 roundtimes for sync + MATURED flow
             const promotedStat = await getStatus(ip, port);
             console.log(`\n  ✓ Node promoted to UNL. UNL=${promotedStat.currentUnl.length}`);
         } catch(e) {
-            if (e.message && e.message.includes('Timed out')) {
-                console.log(`\n  ⚠  Timed out waiting for node to join UNL.`);
-                console.log('  The node may still be syncing. Check status in a moment.');
-            } else {
-                console.error(`  ✗ Bundle deploy failed: ${e.message}`);
-                console.log('  ⚠  Node registered but bundle not deployed. Deploy manually:');
-                console.log(`     evdevkit deploy <bundle.zip> ${dom} ${user}`);
-            }
+            console.error(`  ✗ Bundle deploy failed: ${e.message}`);
+            console.log('  ⚠  Node registered but bundle not deployed. Deploy manually:');
+            console.log(`     evdevkit deploy <bundle.zip> ${dom} ${user}`);
         }
     } catch(e) { console.error(`\n  ✗ Add node failed: ${e.message}`); }
     console.log('─────────────────────────────────────────────────────\n');
@@ -1267,7 +1245,7 @@ const opRemoveNode = async () => {
         await pollUntil(async () => {
             const s = await getStatus(ip, port);
             process.stdout.write(`  UNL: ${s.currentUnl.length}/${expectedUnl} | voteStatus: ${s.voteStatus}          \r`);
-            return s.currentUnl.length >= expectedUnl && s.voteStatus === 'synced' ? s : null;
+            return s.currentUnl.length === expectedUnl && s.voteStatus === 'synced' ? s : null;
         }, roundtime * 20);
         console.log(`\n  ✓ Node removed. UNL=${expectedUnl}`);
         // Clean up stale peer connection
@@ -1768,7 +1746,7 @@ const main = async () => {
     const clientNodeModules = path.join(TOOL_DIR, 'client', 'node_modules');
     if (!fs.existsSync(clientNodeModules)) {
         console.log('\n  Installing dependencies...');
-        execSync(`npm install --prefix ${path.join(TOOL_DIR, 'client')} --silent`, { env: { ...process.env, BLAKE3_FORCE_WASM: '1' } });
+        execSync(`npm install --prefix ${path.join(TOOL_DIR, 'client')} --silent`);
         console.log('  ✓ Done\n');
     }
 

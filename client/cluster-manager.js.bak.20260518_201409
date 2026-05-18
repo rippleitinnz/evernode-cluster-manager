@@ -10,7 +10,7 @@
 
 'use strict';
 
-const TOOL_VERSION = 'v3.2.0';
+const TOOL_VERSION = 'v3.1.2';
 
 const path         = require('path');
 const fs           = require('fs');
@@ -1058,6 +1058,7 @@ const opAddNode = async () => {
             const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
             if (p && p.domain && p.peerPort) {
                 bootstrapPeer = `${p.domain}:${p.peerPort}`;
+                console.log(`  ✓ Bootstrap peer selected by cluster: ${bootstrapPeer}`);
             }
         }
     } catch(e) {
@@ -1065,26 +1066,8 @@ const opAddNode = async () => {
     }
     if (!bootstrapPeer) {
         bootstrapPeer = stat.peers.length > 0 ? stat.peers[0] : `${ip}:${parseInt(port)-1}`;
+        console.log(`  ⚠  Using fallback bootstrap peer: ${bootstrapPeer}`);
     }
-
-    // Show available peers and allow user to override bootstrap selection
-    const availablePeers = stat.peers.length > 0 ? stat.peers : [bootstrapPeer];
-    console.log('\n  ── Bootstrap Peer Selection ─────────────────────────────');
-    availablePeers.forEach((p, i) => {
-        const marker = p === bootstrapPeer ? ' (recommended)' : '';
-        console.log(`    ${i + 1}. ${p}${marker}`);
-    });
-    console.log('');
-    const bpInput = (await ask(`  Select peer (1-${availablePeers.length}) or Enter to accept recommended: `)).trim();
-    if (bpInput) {
-        const bpIdx = parseInt(bpInput) - 1;
-        if (!isNaN(bpIdx) && bpIdx >= 0 && bpIdx < availablePeers.length) {
-            bootstrapPeer = availablePeers[bpIdx];
-        } else {
-            console.log('  Invalid selection — using recommended peer.');
-        }
-    }
-    console.log(`  ✓ Bootstrap peer: ${bootstrapPeer}`);
 
     // initCfg goes into Xahau memo — 1 peer only to stay under 1KB limit.
     const initCfg = {
