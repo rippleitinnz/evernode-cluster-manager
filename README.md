@@ -453,3 +453,4 @@ Future versions will integrate peer port compliance data from the Host Discovery
 - Backups of contract state are created automatically before each upgrade (last 5 kept)
 - If an upgrade fails, `post_exec.sh` automatically rolls back `patch.cfg`
 - When managing large clusters (7+ nodes), stagger lease expiry times to protect consensus against simultaneous node loss
+- Set `DEBUG=true` in `~/.evernode-clusters/.env` to enable debug logging. All console output is mirrored to `~/.evernode-clusters/cluster-manager.log` with timestamps. Log rotates at 2MB, keeping one previous log as `cluster-manager.log.1`. Remove or set `DEBUG=false` to disable.

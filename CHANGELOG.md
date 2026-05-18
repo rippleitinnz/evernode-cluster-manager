@@ -1,6 +1,21 @@
 # Evernode Cluster Manager — Changelog
 
 ---
+## v3.2.1 (2026-05-19)
+
+### cluster-manager.js
+
+**Debug logging**
+- Added global debug logging controlled by `DEBUG=true` in `~/.evernode-clusters/.env`. When enabled, all `console.log`, `console.error` and `console.warn` output is mirrored to `~/.evernode-clusters/cluster-manager.log` with ISO timestamps and `[INFO]`/`[ERROR]`/`[WARN]` level tags. Disabled by default — no performance impact when off. Log rotates at 2MB, keeping one previous log as `cluster-manager.log.1`.
+
+**cluster.info full UNL**
+- `opAddNode` now writes all current UNL nodes to `cluster.info` instead of just the anchor node. No memo size constraint applies — `cluster.info` is a bundle file. Gives new nodes multiple peers to try when sending MATURED.
+
+**Hash mismatch display fix**
+- Node health check now only flags `✗ HASH MISMATCH` when two nodes at the same LCL sequence number disagree on the ledger hash. Previously flagged all nodes as mismatched when any node was 1 LCL behind, which is normal network behaviour and not a fork.
+
+**extend lease decimal precision (upstream fix)**
+- Identified root cause of intermittent `TRANSACTION_FAILURE` on multi-moment lease extensions: JavaScript floating point precision loss when multiplying `moments * leaseAmount` (e.g. `23 * 0.00007 = 0.0016099999999999999`). Fix submitted upstream: [EvernodeXRPL/evernode-js-client#244](https://github.com/EvernodeXRPL/evernode-js-client/pull/244). Local workaround — see README Known Issues.
 
 ## v3.2.0 (2026-05-19)
 
@@ -23,9 +38,6 @@
 - `opAddNode` now writes all current UNL nodes to `cluster.info` instead of just one anchor node. No memo size constraint applies — `cluster.info` is a bundle file. Gives new nodes multiple peers to try when connecting.
 
 **`TOOL_VERSION`** bumped to `v3.2.0`.
-
-**Bug identified: extend lease decimal precision (upstream)**
-- `extendLease` fails with `TRANSACTION_FAILURE` for moment counts > 1 on hosts with certain leaseAmount values due to JavaScript floating point precision loss. Root cause identified and fix submitted upstream: [EvernodeXRPL/evernode-js-client#244](https://github.com/EvernodeXRPL/evernode-js-client/pull/244). Local workaround: patch `/usr/lib/node_modules/evdevkit/node_modules/evernode-js-client/index.js` — see README Known Issues.
 
 ### npm package (evernode-client-cluster-manager@1.3.0)
 
