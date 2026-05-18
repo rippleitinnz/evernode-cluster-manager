@@ -1337,6 +1337,23 @@ const opRemoveNode = async () => {
                 console.log(`  ✓ Peer removed: ${peerIp}:${peerPort}`);
             } catch(e) { console.log(`  ⚠  Peer removal failed: ${e.message}`); }
         }
+        // Terminate the lease on-chain to evict the container and prevent further access.
+        // The removed node's URI token is burned and the host evicts the instance.
+        if (nodeInfo && nodeInfo.name) {
+            try {
+                console.log(`  Terminating lease for ${nodeInfo.domain}...`);
+                const { tenant, xrplApi } = await getEvernodeTenant();
+                await tenant.connect();
+                await tenant.terminateLease(nodeInfo.name);
+                await tenant.disconnect();
+                await xrplApi.disconnect();
+                console.log(`  ✓ Lease terminated — instance evicted.`);
+            } catch(e) {
+                console.log(`  ⚠  Lease termination failed: ${e.message} (may already be evicted)`);
+            }
+        } else {
+            console.log(`  ⚠  No lease name found — skipping termination.`);
+        }
         const doReport = (await askYesNo('  Report this host as problematic? (yes/y or Enter to skip): '));
         if (isYes(doReport)) {
             const ni = loadNodes().find(n => n.pubkey === targetPubkey) || {};
