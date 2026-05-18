@@ -35,3 +35,6 @@ contract.bak*/
 contract/src/index*.js
 !contract/src/index.js
 patches/
+client/*.bak.*
+client/*.patch-attempt
+tools/
