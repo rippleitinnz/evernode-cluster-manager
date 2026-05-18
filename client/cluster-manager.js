@@ -835,8 +835,17 @@ const checkClusterHealth = async (nodes) => {
 
     const reachable = results.filter(r => !r.error);
     const unreachable = results.filter(r => r.error);
-    const hashes = reachable.map(r => r.lcl.ledgerHash);
-    const allHashesMatch = hashes.length > 0 && hashes.every(h => h === hashes[0]);
+    // Only flag hash mismatch if nodes at the same LCL sequence disagree.
+    // Nodes that are 1 ledger behind will naturally have a different hash — that is not a fork.
+    const allHashesMatch = reachable.length > 0 && (() => {
+        const bySeq = {};
+        for (const r of reachable) {
+            const seq = r.lcl.ledgerSeqNo;
+            if (!bySeq[seq]) bySeq[seq] = [];
+            bySeq[seq].push(r.lcl.ledgerHash);
+        }
+        return Object.values(bySeq).every(group => group.every(h => h === group[0]));
+    })();
     const anyWeaklyConnected = reachable.some(r => r.weaklyConnected);
     const safeToRemove = allHashesMatch && !anyWeaklyConnected && unreachable.length === 0;
 
@@ -1399,7 +1408,7 @@ const opExtendLease = async () => {
             successCount++;
         } catch(e) {
             console.log(`✗`);
-            console.log(`    FAILED — ${e.reason || e.message || JSON.stringify(e)}`);
+            console.log(`    FAILED — ${e.reason || e.message || JSON.stringify(e)}`); console.log(`    DEBUG — reason:${e.reason} message:${e.message} content:${e.content} error:${e.error}`);
             failCount++;
             failedDomains.push(node.domain);
         }
