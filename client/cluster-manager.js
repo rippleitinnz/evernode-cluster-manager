@@ -22,6 +22,57 @@ const os           = require('os');
 // Suppress HP client connection logging (show errors only)
 require('hotpocket-js-client').setLogLevel(1);
 
+// ── Debug logging ─────────────────────────────────────────────
+// When DEBUG=true in ~/.evernode-clusters/.env, all console output is
+// mirrored to ~/.evernode-clusters/cluster-manager.log with timestamps.
+// Log rotates at 2MB, keeping one previous log as cluster-manager.log.1
+const GLOBAL_LOG = path.join(os.homedir(), '.evernode-clusters', 'cluster-manager.log');
+const MAX_LOG_BYTES = 2 * 1024 * 1024; // 2MB
+
+const initDebugLogging = () => {
+    // Load global env to check DEBUG flag before PROJECT_DIR is set
+    const globalEnvPath = path.join(os.homedir(), '.evernode-clusters', '.env');
+    let debugEnabled = false;
+    try {
+        if (fs.existsSync(globalEnvPath)) {
+            const envContent = fs.readFileSync(globalEnvPath, 'utf8');
+            debugEnabled = /^\s*DEBUG\s*=\s*true\s*$/m.test(envContent);
+        }
+    } catch {}
+    if (!debugEnabled) return;
+
+    const logDir = path.dirname(GLOBAL_LOG);
+    try { fs.mkdirSync(logDir, { recursive: true }); } catch {}
+
+    const rotateLogs = () => {
+        try {
+            if (fs.existsSync(GLOBAL_LOG) && fs.statSync(GLOBAL_LOG).size >= MAX_LOG_BYTES) {
+                fs.renameSync(GLOBAL_LOG, GLOBAL_LOG + '.1');
+            }
+        } catch {}
+    };
+
+    const writeLog = (level, args) => {
+        rotateLogs();
+        const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+        const line = `[${ts}] [${level}] ${args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')}
+`;
+        try { fs.appendFileSync(GLOBAL_LOG, line); } catch {}
+    };
+
+    const origLog   = console.log.bind(console);
+    const origError = console.error.bind(console);
+    const origWarn  = console.warn.bind(console);
+
+    console.log   = (...args) => { origLog(...args);   writeLog('INFO',  args); };
+    console.error = (...args) => { origError(...args); writeLog('ERROR', args); };
+    console.warn  = (...args) => { origWarn(...args);  writeLog('WARN',  args); };
+
+    console.log(`[ClusterManager] Debug logging enabled → ${GLOBAL_LOG}`);
+};
+
+initDebugLogging();
+
 // ── Tool and projects paths ───────────────────────────────────
 const TOOL_DIR       = path.dirname(__dirname);
 const TOOL_CONTRACT  = path.join(TOOL_DIR, 'contract', 'dist');
