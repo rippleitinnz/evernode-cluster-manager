@@ -24,6 +24,9 @@
 
 **`TOOL_VERSION`** bumped to `v3.2.0`.
 
+**Bug identified: extend lease decimal precision (upstream)**
+- `extendLease` fails with `TRANSACTION_FAILURE` for moment counts > 1 on hosts with certain leaseAmount values due to JavaScript floating point precision loss. Root cause identified and fix submitted upstream: [EvernodeXRPL/evernode-js-client#244](https://github.com/EvernodeXRPL/evernode-js-client/pull/244). Local workaround: patch `/usr/lib/node_modules/evdevkit/node_modules/evernode-js-client/index.js` — see README Known Issues.
+
 ### npm package (evernode-client-cluster-manager@1.3.0)
 
 - MATURED flow fixed — `hotpocket-js-client` moved to top-level static require so ncc bundles it correctly

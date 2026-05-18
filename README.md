@@ -408,10 +408,22 @@ XAHAU_WS=ws://localhost:6008
 
 ## Known Issues
 
-### Extend lease intermittent failure
+### Extend lease decimal precision bug (upstream)
 
-When extending multiple instances on the same Evernode host in the same session, one or more extensions may fail with `TRANSACTION_FAILURE`. This is a sequence number conflict — retry the failed nodes individually. This will be fixed in a future release.
+`extendLease` fails with `TRANSACTION_FAILURE` when extending by more than 
+1 moment on hosts with certain leaseAmount values (e.g. 0.00007). JavaScript 
+floating point multiplication produces imprecise results — 
+23 * 0.00007 = 0.0016099999999999999 — which exceeds Xahau's decimal 
+precision limit. Single-moment extensions always succeed.
 
+A fix has been submitted upstream: [evernode-js-client PR #XXX](link).
+
+**Local workaround:** patch the installed evdevkit:
+```bash
+sed -i 's/moments \* uriInfo\.leaseAmount/parseFloat((moments * uriInfo.leaseAmount).toFixed(8))/' /usr/lib/node_modules/evdevkit/node_modules/evernode-js-client/index.js
+```
+
+What's the PR number from GitHub?
 ### evdevkit cluster-create host deduplication bug
 
 There is a known bug in `evdevkit cluster-create` where the chunk-size allocation algorithm can place two nodes on the same host when that host has more than 1 available slot. The cluster manager mitigates this by:
