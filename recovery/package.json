@@ -1,0 +1,12 @@
+{
+  "name": "evernode-cluster-manager-recovery",
+  "version": "1.0.0",
+  "description": "Emergency recovery contract — no dependency on evernode-client-cluster-manager",
+  "main": "index.js",
+  "dependencies": {
+    "hotpocket-nodejs-contract": "0.7.4"
+  },
+  "scripts": {
+    "build": "rm -rf dist && mkdir -p dist && cp src/index.js dist/index.js && cp -r node_modules dist/node_modules && cp package.json dist/package.json"
+  }
+}

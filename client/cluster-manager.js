@@ -1622,6 +1622,102 @@ const opResetCredentials = async () => {
     console.log('  ✓ Global credentials updated.');
 };
 
+// ── Tools menu ────────────────────────────────────────────────
+const opTools = async () => {
+    console.log('\n── Tools ────────────────────────────────────────────');
+    while (true) {
+        console.log('');
+        console.log('    1. Deploy recovery contract');
+        console.log('    2. Destroy cluster — terminate all leases');
+        console.log('    3. Reset global credentials');
+        console.log('    0. Back');
+        console.log('');
+        const choice = (await ask('  Choice: ')).trim();
+
+        if (choice === '0') break;
+
+        else if (choice === '1') {
+            console.log('\n  Deploying recovery contract...');
+            console.log('  ⚠  This replaces the running contract with a minimal recovery version.');
+            console.log('  ⚠  Immediately follow with option 2 to restore the real contract.');
+            const confirm = (await ask('  Type \'yes\' to confirm: ')).trim();
+            if (confirm !== 'yes') { console.log('  Cancelled.'); continue; }
+            try {
+                const recoveryDir = path.join(TOOL_DIR, 'recovery', 'dist');
+                if (!fs.existsSync(path.join(recoveryDir, 'index.js'))) {
+                    console.error('  ✗ Recovery contract not built. Run: cd recovery && npm install && npm run build');
+                    continue;
+                }
+                const stat = await getActivePeer();
+                if (stat.voteStatus !== 'synced') { console.error('  ✗ Cluster not synced.'); continue; }
+                const firstNode = stat.currentUnl[0];
+                const tmpDir = path.join(PROJECT_DIR, 'recovery-tmp');
+                fs.mkdirSync(tmpDir, { recursive: true });
+                execSync(`cp -r "${recoveryDir}/." "${tmpDir}/"`, { encoding: 'utf8' });
+                execSync(
+                    `${sudo}evdevkit bundle "${tmpDir}" ${firstNode} /usr/bin/node -a index.js`,
+                    { encoding: 'utf8', cwd: PROJECT_DIR, env: process.env }
+                );
+                execSync(`rm -rf "${tmpDir}"`);
+                const bundlePath = path.join(PROJECT_DIR, 'bundle', 'bundle.zip');
+                console.log(`  ✓ Recovery bundle created. ${(fs.statSync(bundlePath).size/1024).toFixed(1)} KB`);
+                const bundle = fs.readFileSync(bundlePath).toString('base64');
+                await submitInput(ip, port, { type: 'upgrade', bundle });
+                console.log('  ✓ Accepted. Waiting for recovery contract...');
+                const roundtime = parseInt(process.env.HP_ROUNDTIME || 6000);
+                await pollUntil(async () => {
+                    const v = await getContractVersion(ip, port);
+                    process.stdout.write(`  Checking version: ${v}          \r`);
+                    return v === 'recovery' ? v : null;
+                }, roundtime * 20);
+                console.log('\n  ✓ Recovery contract active. Use option 2 to restore real contract.');
+            } catch(e) { console.error(`  ✗ Failed: ${e.message}`); }
+        }
+
+        else if (choice === '2') {
+            console.log('\n  ⚠  DESTROY CLUSTER — This will terminate ALL leases, burn all URI tokens');
+            console.log('  ⚠  and evict all containers. The cluster cannot be recovered.');
+            console.log('  ⚠  This cannot be undone.');
+            const confirm1 = (await ask('  Type \'yes\' to confirm: ')).trim();
+            if (confirm1 !== 'yes') { console.log('  Cancelled.'); continue; }
+            const confirm2 = (await ask('  Are you sure? Type \'destroy\' to proceed: ')).trim();
+            if (confirm2 !== 'destroy') { console.log('  Cancelled.'); continue; }
+            try {
+                const nodes = loadNodes();
+                if (!nodes.length) { console.log('  No nodes found in cluster-nodes.json.'); continue; }
+                const { tenant, xrplApi } = await getEvernodeTenant();
+                await tenant.connect();
+                for (const node of nodes) {
+                    try {
+                        process.stdout.write(`  Terminating ${node.domain}...`);
+                        await tenant.terminateLease(node.name);
+                        console.log(' ✓');
+                    } catch(e) {
+                        console.log(` ✗ ${e.message}`);
+                    }
+                }
+                await tenant.disconnect();
+                await xrplApi.disconnect();
+                saveNodes([]);
+                console.log('  ✓ All nodes terminated. cluster-nodes.json cleared.');
+            } catch(e) { console.error(`  ✗ Failed: ${e.message}`); }
+        }
+
+        else if (choice === '3') {
+            console.log('\n  ⚠  This will delete your tenant secret, private key and all global settings.');
+            console.log('  ⚠  All projects will lose their shared credentials.');
+            const confirm1 = (await ask('  Type \'yes\' to confirm: ')).trim();
+            if (confirm1 !== 'yes') { console.log('  Cancelled.'); continue; }
+            const confirm2 = (await ask('  Are you sure? Type \'reset\' to proceed: ')).trim();
+            if (confirm2 !== 'reset') { console.log('  Cancelled.'); continue; }
+            await opResetCredentials();
+        }
+
+        else { console.log('  Invalid choice.'); }
+    }
+    console.log('─────────────────────────────────────────────────────\n');
+};
+
 // ── Project selector ──────────────────────────────────────────
 
 const selectProject = async () => {
@@ -1634,7 +1730,7 @@ const selectProject = async () => {
 
     console.log('  Select a project:\n');
     console.log('    1. Create new project');
-    console.log('    2. Reset global credentials');
+    console.log('    2. Tools');
     console.log('    3. Remove projects');
     projects.forEach((p,i) => {
         const status = p.contractId ? `contract: ${p.contractId.slice(0,8)}… | ${p.lastNode||'no node saved'}` : 'no cluster yet';
@@ -1648,7 +1744,7 @@ const selectProject = async () => {
         const idx=parseInt(input);
         if (idx===projects.length+4) { rl.close(); process.exit(0); }
         if (idx===1) { return await createProject(); }
-        if (idx===2) { await opResetCredentials(); return await selectProject(); }
+        if (idx===2) { await opTools(); return await selectProject(); }
         if (idx===3) {
             // Remove projects
             console.log('\n  Select projects to remove (comma-separated numbers, e.g. 1,3,5):');
@@ -2010,7 +2106,8 @@ const managementMenu = async () => {
         console.log('    8. Read node log');
         console.log('    9. Report problematic host');
         console.log('   10. Cluster settings');
-        console.log('   11. Switch project');
+        console.log('   11. Tools');
+        console.log('   12. Switch project');
         console.log('    0. Exit');
         console.log('');
         const choice=(await ask('  Choice: ')).trim();
@@ -2027,7 +2124,8 @@ const managementMenu = async () => {
             case '8': await opReadLog(); break;
             case '9': await opReportHost(); break;
             case '10': await opClusterSettings(); break;
-            case '11': return 'switch';
+            case '11': await opTools(); break;
+            case '12': return 'switch';
             case '0': console.log('  Goodbye.\n'); rl.close(); process.exit(0);
             default: console.log('  Invalid choice.\n');
         }

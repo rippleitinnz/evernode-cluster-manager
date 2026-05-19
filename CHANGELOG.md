@@ -15,6 +15,12 @@
   - **Change round time** — enter a new roundtime in ms (1000–3600000). Deploys a config-only bundle upgrade to all nodes via `submitConfigUpgrade()`. Takes effect within one consensus round without a version bump or code change. Confirmed working on live cluster.
   - ~~Change log level~~ — removed pending hpcore PR [EvernodeXRPL/hpcore#xxx](https://github.com/EvernodeXRPL/hpcore). Log level is only read at hpcore startup and cannot be changed dynamically on the current released binary. Will be re-added once the PR is merged and deployed.
 
+**Tools menu (option 11)**
+- New sub-menu for emergency and administrative operations. Deploy recovery contract — a minimal contract with no dependency on `evernode-client-cluster-manager` that can be deployed when the main contract is broken, immediately restoring the upgrade mechanism. Destroy cluster — terminates all leases on-chain with two-step confirmation (`yes` then `destroy`). Reset global credentials — moved here from the project selector, also with two-step confirmation (`yes` then `reset`).
+
+**Recovery contract**
+- Minimal `recovery/` contract added to the repo. No dependency on `evernode-client-cluster-manager` — only requires `hotpocket-nodejs-contract`. Handles `upgrade` and `status` inputs, runs self-repair on every round (fixes bad `package.json` fields), and deploys `post_exec.sh` with the same logic as the main contract. Keep `recovery/dist/` built and ready.
+
 **`submitConfigUpgrade()` helper**
 - Shared helper for config-only bundle upgrades. Bundles and deploys the current contract with an `hp.cfg.override` file containing the config change, then polls for `voteStatus === synced`. Does not bump the contract version string. Used by roundtime change in Cluster Settings.
 
@@ -26,11 +32,11 @@
 ### npm package (evernode-client-cluster-manager@1.3.1)
 
 - Dynamic log level and roundtime in `handleUpgrade` via `hp.cfg.override` — see npm CHANGELOG for details.
-- DEP0128 deprecation warning suppressed — `exports` field added to `package.json`.
+- DEP0128 deprecation warning fixed — corrected `"main"` field to `"index.js"` and added `"type": "commonjs"`. The contract build script copies the ncc bundle to the package root, not into a `dist/` subdirectory, so the previous `main` path was wrong. Warning is now gone from `rw.stderr.log`.
 
 ### contract/src/index.js
 
-- Version bumped to `1.2.1`.
+- Version reset to `1.2.1` (was incorrectly at `1.9.2` from local testing).
 
 ---
 

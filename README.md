@@ -20,6 +20,7 @@ A single tool for deploying and managing multiple HotPocket smart contract clust
 - Maintains full peer mesh in `patch.cfg` across all nodes — cold restarts always find live peers
 - Auto-failover to any reachable node when the primary peer is unreachable
 - Live cluster configuration via Cluster Settings — active peer, bootstrap peer, round time
+- Emergency recovery via Tools menu — deploy recovery contract, destroy cluster, reset credentials
 
 ## What's new in v3.3.0
 
@@ -31,6 +32,8 @@ A single tool for deploying and managing multiple HotPocket smart contract clust
 - **Change round time** — enter a new roundtime in ms (1000–3600000). Deploys a config-only bundle upgrade to all nodes. Takes effect within one consensus round without a version bump.
 
 **`PREFERRED_PEER` and `PREFERRED_BOOTSTRAP`.** Both settings persist in the project `.env` across sessions. `PREFERRED_PEER` is tried first by the auto-failover. `PREFERRED_BOOTSTRAP` is used by `opAddNode` before querying the cluster.
+
+**Tools menu (option 11).** Emergency and administrative operations in a dedicated sub-menu: deploy recovery contract, destroy cluster (terminate all leases), and reset global credentials. Destructive operations require two-step confirmation. Reset global credentials moved here from the project selector.
 
 ## What's new in v3.2.1
 
@@ -194,7 +197,8 @@ hpc.init(contract);
   8. Read node log
   9. Report problematic host
  10. Cluster settings
- 11. Switch project
+ 11. Tools
+ 12. Switch project
   0. Exit
 ```
 
@@ -272,7 +276,17 @@ Sub-menu for live cluster configuration:
 | 3 | Change round time | Update `consensus.roundtime` across all nodes via a config-only bundle upgrade. Takes effect within one consensus round. |
 | 0 | Back | Return to main menu. |
 
-### Option 11 — Switch Project
+### Option 11 — Tools
+Emergency and administrative operations:
+
+| # | Action | Description |
+|---|--------|-------------|
+| 1 | Deploy recovery contract | Deploys a minimal contract with no dependency on `evernode-client-cluster-manager`. Use when the main contract cannot load. Immediately follow with option 2 to restore the real contract. |
+| 2 | Destroy cluster | Terminates ALL leases on-chain, burns URI tokens, evicts all containers. Two-step confirmation required. Cannot be undone. |
+| 3 | Reset global credentials | Overwrites shared tenant credentials used by all projects. Two-step confirmation required. |
+| 0 | Back | Return to main menu. |
+
+### Option 12 — Switch Project
 
 Return to the project selector without exiting the tool.
 
