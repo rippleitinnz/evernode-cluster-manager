@@ -271,7 +271,11 @@ const getActivePeer = async () => {
 const reconcileNodes = (nodes, currentUnl, voteStatus) => {
     if (voteStatus !== 'synced') return nodes; // never strip during unstable state
     if (currentUnl.length < 3) return nodes;   // never strip below minimum
-    return nodes.filter(n => currentUnl.includes(n.pubkey));
+    // Only strip nodes that are NOT in the UNL AND have no lease data (name/host).
+    // Nodes with lease data must be removed explicitly via opRemoveNode to preserve
+    // the name/host/createdTimestamp fields needed for lease termination.
+    // This prevents reconcileNodes from destroying termination data during instability.
+    return nodes.filter(n => currentUnl.includes(n.pubkey) || n.name);
 };
 
 const timeRemaining = (node) => {
@@ -1085,7 +1089,8 @@ const opUpdateContract = async () => {
     const distNodeModules = path.join(TOOL_CONTRACT, 'node_modules');
     if (fs.existsSync(distNodeModules)) {
         execSync(`cp -r "${distNodeModules}" "${CONTRACT_DIR}/"`, { encoding: 'utf8' });
-        ensureNccBundle(`${CONTRACT_DIR}/node_modules`);
+        // ensureNccBundle not needed here — cp -r already copies the full node_modules
+        // including the ncc bundle from TOOL_CONTRACT which is always pre-built.
         console.log('  ✓ Copied node_modules to project.');
     }
     console.log('  ✓ Copied built contract to project.');
@@ -1157,8 +1162,13 @@ const opAddNode = async () => {
     const logLevel = process.env.HP_LOG_LEVEL||'dbg';
     // Ask cluster which node is best for bootstrapping — cluster has ground truth
     // on peer connectivity. Falls back to stat.peers[0] if unavailable.
+    // If PREFERRED_BOOTSTRAP is set, use it directly without querying the cluster.
     let bootstrapPeer = null;
-    try {
+    if (process.env.PREFERRED_BOOTSTRAP) {
+        bootstrapPeer = process.env.PREFERRED_BOOTSTRAP;
+        console.log(`  ✓ Bootstrap peer: ${bootstrapPeer} (preferred)`);
+    }
+    if (!bootstrapPeer) try {
         const HP2 = require('hotpocket-js-client');
         const kp2 = await getKeyPair();
         const bpClient = await HP2.createClient([`wss://${ip}:${port}`], kp2, { protocol: HP2.protocols.json });
@@ -1381,13 +1391,9 @@ const opRemoveNode = async () => {
             return s.currentUnl.length >= expectedUnl && s.voteStatus === 'synced' ? s : null;
         }, roundtime * 20);
         console.log(`\n  ✓ Node removed. UNL=${expectedUnl}`);
-        // Clean up stale peer connection
-        if (peerIp && peerPort) {
-            try {
-                await submitInput(ip, port, { type: 'removePeer', peerIp, peerPort: parseInt(peerPort) });
-                console.log(`  ✓ Peer removed: ${peerIp}:${peerPort}`);
-            } catch(e) { console.log(`  ⚠  Peer removal failed: ${e.message}`); }
-        }
+        // Note: peer removal (patch.cfg + req_known_remotes flush) is handled
+        // automatically inside handleRemoveNode on all UNL nodes via consensus.
+        // No explicit removePeer input needed from the CLI.
         // Terminate the lease on-chain to evict the container and prevent further access.
         // The removed node's URI token is burned and the host evicts the instance.
         if (nodeInfo && nodeInfo.name) {
