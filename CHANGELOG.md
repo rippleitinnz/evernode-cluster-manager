@@ -29,7 +29,7 @@
 
 **`TOOL_VERSION`** bumped to `v3.3.0`.
 
-### npm package (evernode-client-cluster-manager@1.3.1)
+### npm package (evernode-client-cluster-manager@1.3.2)
 
 - Dynamic log level and roundtime in `handleUpgrade` via `hp.cfg.override` — see npm CHANGELOG for details.
 - DEP0128 deprecation warning fixed — corrected `"main"` field to `"index.js"` and added `"type": "commonjs"`. The contract build script copies the ncc bundle to the package root, not into a `dist/` subdirectory, so the previous `main` path was wrong. Warning is now gone from `rw.stderr.log`.
