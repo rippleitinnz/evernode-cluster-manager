@@ -1162,13 +1162,11 @@ const opAddNode = async () => {
     const logLevel = process.env.HP_LOG_LEVEL||'dbg';
     // Ask cluster which node is best for bootstrapping — cluster has ground truth
     // on peer connectivity. Falls back to stat.peers[0] if unavailable.
-    // If PREFERRED_BOOTSTRAP is set, use it directly without querying the cluster.
-    let bootstrapPeer = null;
-    if (process.env.PREFERRED_BOOTSTRAP) {
-        bootstrapPeer = process.env.PREFERRED_BOOTSTRAP;
-        console.log(`  ✓ Bootstrap peer: ${bootstrapPeer} (preferred)`);
-    }
-    if (!bootstrapPeer) try {
+    // PREFERRED_BOOTSTRAP is injected as position 0 in the candidate list so it
+    // appears first and is marked recommended — but the contract call still runs
+    // and its result is used as fallback. No health bypass.
+    let contractPeer = null;
+    try {
         const HP2 = require('hotpocket-js-client');
         const kp2 = await getKeyPair();
         const bpClient = await HP2.createClient([`wss://${ip}:${port}`], kp2, { protocol: HP2.protocols.json });
@@ -1178,22 +1176,28 @@ const opAddNode = async () => {
             await bpClient.close().catch(() => {});
             const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
             if (p && p.domain && p.peerPort) {
-                bootstrapPeer = `${p.domain}:${p.peerPort}`;
+                contractPeer = `${p.domain}:${p.peerPort}`;
             }
         }
     } catch(e) {
         console.log(`  ⚠  Could not get bootstrap peer from cluster: ${e.message}`);
     }
-    if (!bootstrapPeer) {
-        bootstrapPeer = stat.peers.length > 0 ? stat.peers[0] : `${ip}:${parseInt(port)-1}`;
-    }
-
-    // Show available peers and allow user to override bootstrap selection
-    const availablePeers = stat.peers.length > 0 ? stat.peers : [bootstrapPeer];
+    // Recommended: PREFERRED_BOOTSTRAP if set, otherwise contract recommendation, otherwise first peer
+    const recommended = process.env.PREFERRED_BOOTSTRAP || contractPeer
+        || (stat.peers.length > 0 ? stat.peers[0] : `${ip}:${parseInt(port)-1}`);
+    // Build deduplicated candidate list — recommended first
+    const seen = new Set();
+    const availablePeers = [recommended, ...(stat.peers || [])].filter(p => {
+        if (seen.has(p)) return false;
+        seen.add(p);
+        return true;
+    });
+    let bootstrapPeer = recommended;
     console.log('\n  ── Bootstrap Peer Selection ─────────────────────────────');
     availablePeers.forEach((p, i) => {
-        const marker = p === bootstrapPeer ? ' (recommended)' : '';
+        const marker = p === recommended ? ' (recommended)' : '';
         console.log(`    ${i + 1}. ${p}${marker}`);
+    });
     });
     console.log('');
     const bpInput = (await ask(`  Select peer (1-${availablePeers.length}) or Enter to accept recommended: `)).trim();
@@ -1943,7 +1947,7 @@ const submitConfigUpgrade = async (label, overrideCfg = {}) => {
     const distNodeModules = path.join(TOOL_CONTRACT, 'node_modules');
     if (fs.existsSync(distNodeModules)) {
         execSync(`cp -r "${distNodeModules}" "${CONTRACT_DIR}/"`, { encoding: 'utf8' });
-        ensureNccBundle(`${CONTRACT_DIR}/node_modules`);
+        // ensureNccBundle not needed — cp -r already copies the full ncc bundle.
     }
     const firstNode = stat.currentUnl[0];
     execSync(
