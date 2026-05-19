@@ -17,6 +17,9 @@
 **extend lease decimal precision (upstream fix)**
 - Identified root cause of intermittent `TRANSACTION_FAILURE` on multi-moment lease extensions: JavaScript floating point precision loss when multiplying `moments * leaseAmount` (e.g. `23 * 0.00007 = 0.0016099999999999999`). Fix submitted upstream: [EvernodeXRPL/evernode-js-client#244](https://github.com/EvernodeXRPL/evernode-js-client/pull/244). Local workaround — see README Known Issues.
 
+**Lease termination on node removal**
+- `opRemoveNode` now calls `tenant.terminateLease()` after a node is removed from the UNL. This burns the URI token on-chain and instructs the host to evict the container immediately, regardless of remaining lease time. Prevents a removed node from continuing to run, attempting reconnection, or the host retaining any access to contract state. Confirmed working — both user and peer ports close immediately after termination. Falls back gracefully with a warning if termination fails (e.g. instance already evicted by host).
+
 ## v3.2.0 (2026-05-19)
 
 ### cluster-manager.js

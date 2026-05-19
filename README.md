@@ -19,6 +19,19 @@ A single tool for deploying and managing multiple HotPocket smart contract clust
 - Auto-prunes stale non-UNL nodes from cluster state after 5 moments of inactivity
 - Maintains full peer mesh in `patch.cfg` across all nodes — cold restarts always find live peers
 
+## What's new in v3.2.1
+
+**Lease termination on node removal.** When a node is removed via option 4, the lease is now terminated on-chain immediately after UNL removal. This burns the URI token and instructs the host to evict the container — regardless of remaining lease time. Prevents removed nodes from continuing to run or attempting reconnection. Falls back gracefully if the instance is already evicted.
+
+**Debug logging.** Set `DEBUG=true` in `~/.evernode-clusters/.env` to mirror all console output to `~/.evernode-clusters/cluster-manager.log` with ISO timestamps and `[INFO]`/`[ERROR]`/`[WARN]` level tags. Log rotates at 2MB. Disabled by default.
+
+**Hash mismatch display fix.** The node health check now only flags `✗ HASH MISMATCH` when two nodes at the same LCL sequence disagree on the ledger hash. Nodes that are 1 ledger behind have a different hash by definition — this is normal network behaviour and is no longer incorrectly flagged as a fork.
+
+**`cluster.info` full UNL.** When adding a node, `cluster.info` now contains all current UNL nodes instead of just the anchor node, giving new nodes multiple peers to try when sending MATURED.
+
+**Extend lease decimal precision (upstream).** Identified root cause of intermittent `TRANSACTION_FAILURE` on multi-moment extensions — JavaScript floating point precision loss. Fix submitted upstream: [EvernodeXRPL/evernode-js-client#244](https://github.com/EvernodeXRPL/evernode-js-client/pull/244). Local workaround in README Known Issues.
+
+
 ## What's new in v3.2.0
 
 **Bootstrap peer selection is now visible and overridable.** Before acquire, `opAddNode` displays all available peers and highlights the cluster-recommended one. Press Enter to accept or select a different peer by number. Previously the peer was selected silently with no visibility or ability to override.
@@ -208,6 +221,8 @@ After acquire, the tool registers the new node in the cluster via consensus, wri
 ### Option 4 — Remove a Node
 
 Select a node by index or pubkey. Removes from UNL and cluster state via consensus, waits for the cluster to resync, then cleans up the stale peer entry from patch.cfg and flushes hpcore's retry queue. Will not remove if cluster would drop below 3 nodes. Offers to report the host after removal.
+
+After removal, the lease is terminated on-chain via `tenant.terminateLease()`. This burns the URI token and instructs the host to evict the container immediately — regardless of how much lease time remains. Both user and peer ports will close within seconds of termination. If the instance has already been evicted by the host, the termination step fails gracefully with a warning.
 
 ### Option 5 — Check Node Expiry
 
