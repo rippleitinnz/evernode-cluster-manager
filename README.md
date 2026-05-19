@@ -8,7 +8,7 @@ A single tool for deploying and managing multiple HotPocket smart contract clust
 - Deploys multi-node HotPocket contract clusters on Evernode hosts
 - Updates contract code live without restarting nodes or losing consensus
 - Adds external nodes to a running cluster — bootstrap peer is displayed and selectable before acquire
-- Removes nodes cleanly with stale peer entry cleanup from patch.cfg and live hpcore flush
+- Removes nodes cleanly with stale peer entry cleanup from patch.cfg, live hpcore flush, and on-chain lease termination
 - Reads logs and config remotely from any node (hp.log, stdout, stderr, hp.cfg, patch.cfg, env.vars) — no SSH required
 - Monitors cluster health, consensus status and vote state per node — LCL hash comparison, weaklyConnected status, safe-to-remove assessment
 - Detects weakly connected nodes and offers automatic cluster repair
@@ -18,6 +18,19 @@ A single tool for deploying and managing multiple HotPocket smart contract clust
 - Reports broken hosts to exclude them from future searches
 - Auto-prunes stale non-UNL nodes from cluster state after 5 moments of inactivity
 - Maintains full peer mesh in `patch.cfg` across all nodes — cold restarts always find live peers
+- Auto-failover to any reachable node when the primary peer is unreachable
+- Live cluster configuration via Cluster Settings — active peer, bootstrap peer, round time
+
+## What's new in v3.3.0
+
+**Auto-failover when primary peer is unreachable.** Every operation now uses `getActivePeer()` instead of a fixed connection. On failure it tries `PREFERRED_PEER` first, then falls back through all nodes in `cluster-nodes.json` in order until one responds. The active peer updates automatically and is saved for the next session. Previously a dead primary node would block all operations.
+
+**Cluster Settings (option 10).** New sub-menu for live cluster configuration:
+- **Change active peer** — select from all cluster nodes by number or enter `domain:port`. Saves as `PREFERRED_PEER` and takes effect immediately.
+- **Change bootstrap peer** — select the preferred peer for new node acquisitions. Saves as `PREFERRED_BOOTSTRAP`.
+- **Change round time** — enter a new roundtime in ms (1000–3600000). Deploys a config-only bundle upgrade to all nodes. Takes effect within one consensus round without a version bump.
+
+**`PREFERRED_PEER` and `PREFERRED_BOOTSTRAP`.** Both settings persist in the project `.env` across sessions. `PREFERRED_PEER` is tried first by the auto-failover. `PREFERRED_BOOTSTRAP` is used by `opAddNode` before querying the cluster.
 
 ## What's new in v3.2.1
 
@@ -31,24 +44,17 @@ A single tool for deploying and managing multiple HotPocket smart contract clust
 
 **Extend lease decimal precision (upstream).** Identified root cause of intermittent `TRANSACTION_FAILURE` on multi-moment extensions — JavaScript floating point precision loss. Fix submitted upstream: [EvernodeXRPL/evernode-js-client#244](https://github.com/EvernodeXRPL/evernode-js-client/pull/244). Local workaround in README Known Issues.
 
-
 ## What's new in v3.2.0
 
-**Bootstrap peer selection is now visible and overridable.** Before acquire, `opAddNode` displays all available peers and highlights the cluster-recommended one. Press Enter to accept or select a different peer by number. Previously the peer was selected silently with no visibility or ability to override.
+**Bootstrap peer selection is now visible and overridable.** Before acquire, `opAddNode` displays all available peers and highlights the cluster-recommended one. Press Enter to accept or select a different peer by number.
 
-**MATURED flow fixed end-to-end.** New nodes now reliably join the UNL. The root cause was a dynamic `require('hotpocket-js-client')` inside `checkAndSendMatured` that ncc could not statically bundle — the module was silently absent from the compiled output and the function failed every round. Fixed in npm package 1.3.0.
+**MATURED flow fixed end-to-end.** New nodes now reliably join the UNL. Fixed in npm package 1.3.0.
 
-**Full peer mesh in `patch.cfg`.** After every node addition, removal, or promotion, all nodes receive the complete UNL peer list in `patch.cfg` `mesh.known_peers`. Previously nodes only had their single bootstrap peer, meaning a cold restart with a dead bootstrap peer left the node isolated.
+**Full peer mesh in `patch.cfg`.** After every node addition, removal, or promotion, all nodes receive the complete UNL peer list in `patch.cfg` `mesh.known_peers`.
 
-**`cluster.info` now contains the full UNL.** The bootstrap file deployed to new nodes previously contained only one anchor node. It now contains all current UNL nodes, giving new nodes multiple peers to try when sending MATURED.
+**`cluster.info` now contains the full UNL.** The bootstrap file deployed to new nodes now contains all current UNL nodes.
 
-**Stale `cluster.info` cleanup.** `opDeploy` now deletes any leftover `cluster.info` from `contract/dist/` before bundling. Previously a file from a prior `opAddNode` run could be bundled into a fresh cluster deploy, giving every node stale peer data from a different cluster.
-
-**Poll condition fixed.** Step 4 of `opAddNode` now polls for `UNL >= expectedUnl` instead of `UNL === expectedUnl`. If multiple pending nodes are promoted simultaneously the UNL count can jump past the expected value — the strict equality check would then never resolve and always time out.
-
-**Timeout error message fixed.** A poll timeout in step 4 now correctly reports "Timed out waiting for node to join UNL" instead of the misleading "Bundle deploy failed".
-
-**Blake3 warning suppressed.** All `npm install` calls now pass `BLAKE3_FORCE_WASM=1`, suppressing the native binding download warning that appeared on every install.
+**Poll condition fixed.** Step 4 of `opAddNode` now polls for `UNL >= expectedUnl` instead of `UNL === expectedUnl`.
 
 ## Requirements
 
@@ -71,7 +77,7 @@ The contract this repo ships with is intentionally tiny — most of the heavy li
 const HotPocket      = require('hotpocket-nodejs-contract');
 const ClusterManager = require('evernode-client-cluster-manager');
 
-const VERSION = '1.2.0';
+const VERSION = '1.2.1';
 
 const contract = async (ctx) => {
     if (await ClusterManager.init(ctx, VERSION)) return;
@@ -89,7 +95,7 @@ hpc.init(contract);
 
 - **`ClusterManager.init(ctx, VERSION)`** — the npm package handles all 14 management input types and the autonomous round logic (MATURED promotion, stale node pruning). If it returns `true` a management input was processed; the contract returns early so business logic is skipped that round.
 - **`if (ctx.readonly) return;`** — readonly requests are answered inside `ClusterManager.init()`; the contract has nothing else to do for those rounds.
-- **Keepalive NPL broadcast every 15 ledgers** — `ctx.unl.send()` pushes an empty NPL message through the Node Protocol Layer. This forces regular peer-to-peer traffic via the consensus channel even when there's no business logic activity. Useful for diagnostic visibility (NPL packets appear in `hp.log` and confirm peer responsiveness) and for ensuring the consensus engine keeps observable activity on otherwise-idle clusters. At the default 8-second roundtime this fires every ~2 minutes. Harmless to remove if your contract has continuous activity from another source.
+- **Keepalive NPL broadcast every 15 ledgers** — `ctx.unl.send()` pushes an empty NPL message through the Node Protocol Layer. This forces regular peer-to-peer traffic via the consensus channel even when there's no business logic activity. At the default 8-second roundtime this fires every ~2 minutes. Harmless to remove if your contract has continuous activity from another source.
 - **`VERSION`** — the string `opUpdateContract` polls to confirm an upgrade succeeded. Bump it on every change so the cluster manager can verify deployment.
 
 See [evernode-client-cluster-manager on npm](https://www.npmjs.com/package/evernode-client-cluster-manager) for the package's full handler documentation.
@@ -116,7 +122,7 @@ When creating a project, the tool prompts:
 
 ### Option 1 — Default contract
 
-Pick this and the tool uses the contract shipped in `contract/dist/`. Nothing else to do — proceed straight to deployment. Use this when you only need the cluster management features (status, log access, node add/remove, live upgrades) without custom business logic.
+Pick this and the tool uses the contract shipped in `contract/dist/`. Nothing else to do — proceed straight to deployment.
 
 ### Option 2 — Your own contract
 
@@ -137,7 +143,7 @@ my-contract/
   "main": "index.js",
   "dependencies": {
     "hotpocket-nodejs-contract": "0.7.4",
-    "evernode-client-cluster-manager": "^1.2.2"
+    "evernode-client-cluster-manager": "^1.3.1"
   }
 }
 ```
@@ -162,25 +168,18 @@ const hpc = new HotPocket.Contract();
 hpc.init(contract);
 ```
 
-**What the tool does when you pick option 2:**
-
-1. Copies every **top-level file** from your directory into the project's `contract/` folder. Subdirectories and `node_modules` are skipped.
-2. Runs `npm install --prefix <project>/contract` to install your declared dependencies.
-3. Overwrites `node_modules/evernode-client-cluster-manager` with the ncc-bundled copy from the tool's own `contract/dist/`. This guarantees the deployed handler code matches what the CLI was tested against — your declared version in `package.json` only needs to exist for npm to populate `node_modules/`, the actual bytes get replaced.
-4. If `index.js` contains `const CONTRACT_VERSION = '...'`, the tool updates it to the version you entered at project setup.
-
 **Constraints:**
 
-- **Flat layout only.** The CLI does not recursively copy subdirectories. Keep all contract source files at the top level. If you need to factor code, do it as multiple `.js` files alongside `index.js`, not as a folder tree.
-- **Your `package.json` must declare `evernode-client-cluster-manager`.** Without it, `npm install` creates no `node_modules/` directory, and `ensureNccBundle` has nowhere to write — the deploy will fail.
-- **Run `npm init -y` before `npm install` when building a fresh contract directory from scratch.** Without a `package.json` in the directory, npm walks up to a parent and silently installs nothing.
+- **Flat layout only.** The CLI does not recursively copy subdirectories.
+- **Your `package.json` must declare `evernode-client-cluster-manager`.** Without it, `npm install` creates no `node_modules/` directory.
+- **Run `npm init -y` before `npm install` when building a fresh contract directory from scratch.**
 
 ### Critical rules for any custom contract
 
-- **Call `ClusterManager.init()` first.** It handles all management inputs and the autonomous round logic. If it returns `true`, a management input was processed — your business logic must not run that round.
-- **No non-deterministic values in outputs.** Never use `new Date()`, `Math.random()`, or any value that differs between nodes. All nodes must produce identical output for consensus.
-- **Keep a `VERSION` constant** and pass it to `ClusterManager.init()`. The CLI's `Update contract` flow polls this string to confirm deployment succeeded.
-- **Readonly handlers belong inside the `ctx.readonly` block.** `ClusterManager.init()` handles its own readonly handlers internally — any of your own readonly handlers must check `ctx.readonly` and run in that path.
+- **Call `ClusterManager.init()` first.**
+- **No non-deterministic values in outputs.**
+- **Keep a `VERSION` constant** and pass it to `ClusterManager.init()`.
+- **Readonly handlers belong inside the `ctx.readonly` block.**
 
 ## Management Menu
 
@@ -194,51 +193,52 @@ hpc.init(contract);
   7. Find available hosts
   8. Read node log
   9. Report problematic host
- 10. Switch project
+ 10. Cluster settings
+ 11. Switch project
   0. Exit
 ```
 
 ### Option 1 — Check Status
 
-Shows contract version, HP version, vote status, LCL, round time, UNL nodes with domain and time remaining, and connected peers. `Vote Status: synced` confirms healthy consensus. In HP debug logs `Vote status: 3` is the synced state code.
+Shows contract version, HP version, vote status, LCL, round time, UNL nodes with domain and time remaining, and connected peers. `Vote Status: synced` confirms healthy consensus.
 
-If the cluster is weakly connected, the status shows `⚠  WEAKLY CONNECTED` and identifies the unreachable node(s). You are offered the option to automatically replace them — the tool adds a new node, waits for stabilisation, then offers to remove the dead one.
+If the cluster is weakly connected, the status shows `⚠  WEAKLY CONNECTED` and identifies the unreachable node(s). You are offered the option to automatically replace them.
 
-A parallel health check runs across all nodes showing per-node LCL hash, weaklyConnected status and overall safe-to-remove assessment. Hash mismatches are flagged as a possible fork.
+A parallel health check runs across all nodes showing per-node LCL hash, weaklyConnected status and overall safe-to-remove assessment. Hash mismatches are only flagged when nodes at the same LCL sequence disagree — normal 1-ledger lag is not flagged.
 
 ### Option 2 — Update Contract
 
-Enter a new version string. The tool bumps the version, rebuilds via `npm run build` (using `@vercel/ncc` to produce a single bundled `dist/index.js`), bundles with `evdevkit bundle`, sends to the cluster as a consensus input, and polls until all nodes confirm the new version. No restarts required.
+Enter a new version string. The tool bumps the version, rebuilds via `npm run build`, bundles with `evdevkit bundle`, sends to the cluster as a consensus input, and polls until all nodes confirm the new version. No restarts required.
 
-> **Consensus threshold note:** The default threshold is **65%**. With 3 nodes, only 2 must agree, meaning one node can be temporarily offline and upgrades still succeed. For production clusters of 7+ nodes, consider whether a higher threshold is appropriate for your use case.
+> **Consensus threshold note:** The default threshold is **65%**. With 3 nodes, only 2 must agree.
 
 ### Option 3 — Add a Node
 
-The tool queries the running cluster for the optimal bootstrap peer — the cluster selects the most stable node based on `cluster.json` state (original deploy nodes first, then promoted nodes by seniority). The available peers are then displayed and you can select a different one if needed. The selected peer is written into the acquire init config as a single peer entry to stay within the Xahau memo size limit.
+The tool queries the running cluster for the optimal bootstrap peer. The available peers are displayed and you can select a different one if needed. If `PREFERRED_BOOTSTRAP` is set in the project `.env`, it is used first.
 
 After acquire, the tool registers the new node in the cluster via consensus, writes `cluster.info` containing all current UNL nodes, rebuilds the bundle and deploys it. The new node connects to the mesh, syncs state, and sends a MATURED signal — the cluster promotes it to UNL automatically after a stability threshold.
 
 ### Option 4 — Remove a Node
 
-Select a node by index or pubkey. Removes from UNL and cluster state via consensus, waits for the cluster to resync, then cleans up the stale peer entry from patch.cfg and flushes hpcore's retry queue. Will not remove if cluster would drop below 3 nodes. Offers to report the host after removal.
+Select a node by index or pubkey. Removes from UNL and cluster state via consensus, waits for the cluster to resync, then cleans up the stale peer entry from patch.cfg and flushes hpcore's retry queue. Will not remove if cluster would drop below 3 nodes.
 
-After removal, the lease is terminated on-chain via `tenant.terminateLease()`. This burns the URI token and instructs the host to evict the container immediately — regardless of how much lease time remains. Both user and peer ports will close within seconds of termination. If the instance has already been evicted by the host, the termination step fails gracefully with a warning.
+After removal, the lease is terminated on-chain via `tenant.terminateLease()`. This burns the URI token and instructs the host to evict the container immediately — regardless of how much lease time remains. Both user and peer ports will close within seconds of termination.
 
 ### Option 5 — Check Node Expiry
 
-Shows time remaining for each tracked node with expiry timestamp in UTC, accurate to the second. The `Source` column shows `chain` (confirmed from on-chain extension response) or `local` (calculated from `createdTimestamp + lifeMoments × 3600`, accurate until first extension). Warns when any node is within 6 hours of expiry.
+Shows time remaining for each tracked node with expiry timestamp in UTC, accurate to the second. Warns when any node is within 6 hours of expiry.
 
-> **⚠ Staggering warning:** When managing clusters of 5+ nodes, ensure lease expiry times are staggered across nodes. Never allow more than `UNL_count − ceil(UNL_count × threshold)` nodes to expire simultaneously — simultaneous expiry of too many nodes will destroy consensus and may be unrecoverable. Extend nodes in batches with at least 1 moment offset between batches.
+> **⚠ Staggering warning:** Never allow more than `UNL_count − ceil(UNL_count × threshold)` nodes to expire simultaneously.
 
 ### Option 6 — Extend Node Lease
 
-Select nodes by index, comma-separated indices, or `all`. Uses `tenant.extendLease()` directly for full on-chain confirmation. `cluster-nodes.json` is only updated when the blockchain confirms success — silent failures are impossible. The confirmed `expiryMoment` from the chain response is stored for accurate future expiry display. Failed extensions are reported per-node with the chain error reason.
+Select nodes by index, comma-separated indices, or `all`. Uses `tenant.extendLease()` directly for full on-chain confirmation.
 
-> **Note:** When extending multiple instances on the same host, extend them one at a time. Extending two instances on the same host in the same session can cause transaction failures due to sequence number conflicts. This will be fixed in a future release.
+> **Note:** When extending multiple instances on the same host, extend them one at a time to avoid sequence number conflicts.
 
 ### Option 7 — Find Available Hosts
 
-Queries the Host Discovery API for active hosts. Results are deduplicated by operator — maximum 3 hosts per operator. Only hosts with a proven heartbeat in each of the last 3 hourly windows are returned. Hosts can be reported as broken directly from this view.
+Queries the Host Discovery API for active hosts. Results are deduplicated by operator — maximum 3 hosts per operator. Only hosts with a proven heartbeat in each of the last 3 hourly windows are returned.
 
 ### Option 8 — Read Node Log
 
@@ -261,17 +261,26 @@ Specify line count and optionally enable auto-refresh every 5 seconds. No SSH ac
 
 Report any host by its full Xahau address. Reported hosts are excluded from host discovery searches for 7 days.
 
-### Option 10 — Switch Project
+### Option 10 — Cluster Settings
+
+Sub-menu for live cluster configuration:
+
+| # | Setting | Description |
+|---|---------|-------------|
+| 1 | Change active peer | Select preferred node for all operations. Saved as `PREFERRED_PEER` in project `.env`. Auto-failover still applies if unreachable. |
+| 2 | Change bootstrap peer | Select preferred peer for new node acquisitions. Saved as `PREFERRED_BOOTSTRAP` in project `.env`. |
+| 3 | Change round time | Update `consensus.roundtime` across all nodes via a config-only bundle upgrade. Takes effect within one consensus round. |
+| 0 | Back | Return to main menu. |
+
+### Option 11 — Switch Project
 
 Return to the project selector without exiting the tool.
 
 ## Cluster Resilience
 
-When deploying a cluster, avoid placing more than one node on the same Evernode host. If that host goes offline you lose multiple UNL nodes simultaneously — in a 3-node cluster losing 2 nodes makes consensus unrecoverable.
+When deploying a cluster, avoid placing more than one node on the same Evernode host. If that host goes offline you lose multiple UNL nodes simultaneously.
 
-The `evdevkit cluster-create` command has a known chunk-size bug that can assign multiple nodes to the same host when that host has more than 1 available slot. The cluster manager detects this post-deploy and warns you. To minimise risk, prefer hosts with exactly 1 available slot — the tool identifies and surfaces these automatically.
-
-> **⚠ Expiry staggering:** As your cluster grows, always stagger lease expiry times. At a 65% threshold with 8 nodes you can afford to lose at most 2 nodes simultaneously. If 3 or more nodes expire in the same moment, consensus is broken. Extend nodes in batches — never extend all nodes by the same amount at the same time if they already share an expiry moment.
+> **⚠ Expiry staggering:** At a 65% threshold with 8 nodes you can afford to lose at most 2 nodes simultaneously. Extend nodes in batches — never extend all nodes by the same amount at the same time if they already share an expiry moment.
 
 ## Built-in Contract Handlers
 
@@ -296,17 +305,15 @@ The `evdevkit cluster-create` command has a known chunk-size bug that can assign
 
 The contract runs autonomous logic every consensus round regardless of user input:
 
-- **`checkAndPromoteMatured`** — promotes acknowledged nodes to UNL after stability threshold. Writes full peer list to `patch.cfg` and broadcasts to all nodes via `ctx.updatePeers()`. Also auto-prunes nodes stuck in `status: created` for more than 5 moments (never acknowledged, definitively failed).
+- **`checkAndPromoteMatured`** — promotes acknowledged nodes to UNL after stability threshold. Writes full peer list to `patch.cfg` and broadcasts to all nodes via `ctx.updatePeers()`. Also auto-prunes nodes stuck in `status: created` for more than 5 moments.
 - **`checkAndSendMatured`** — runs on non-UNL nodes. Reads `cluster.info` (full UNL peer list) to find existing nodes, connects and sends MATURED signal when synced. Retries up to 3 times.
 
 ## Node Expiry Tracking
 
 Expiry is tracked in `cluster-nodes.json` per node:
 
-- **Before first extension:** `createdTimestamp + lifeMoments × 3600` — accurate to the second, matches `evernode list` exactly
-- **After first extension:** `expiryMoment` stored from on-chain chain response — `MOMENT_BASE_IDX + (expiryMoment × 3600)` — accurate to the Evernode moment boundary
-
-The `Source` column in option 5 shows which method is in use. Both are accurate — `chain` is preferred.
+- **Before first extension:** `createdTimestamp + lifeMoments × 3600` — accurate to the second
+- **After first extension:** `expiryMoment` stored from on-chain response — accurate to the Evernode moment boundary
 
 Evernode moment constants (mainnet, stable as of May 2026):
 - `MOMENT_BASE_IDX = 1702531862` (Evernode epoch, unix seconds)
@@ -319,7 +326,7 @@ Evernode moment constants (mainnet, stable as of May 2026):
 ├── .env                        ← global credentials (shared across all projects)
 └── projects/
     └── my-project/
-        ├── .env                ← project settings and CONTRACT_ID
+        ├── .env                ← project settings, CONTRACT_ID, PREFERRED_PEER, PREFERRED_BOOTSTRAP
         ├── contract/           ← contract files for bundling
         ├── cluster-nodes.json  ← node lease tracking
         └── hp-init.cfg         ← acquisition bootstrap config
@@ -341,8 +348,6 @@ Evernode moment constants (mainnet, stable as of May 2026):
 }
 ```
 
-`expiryMoment` is populated after the first confirmed on-chain extension. Before that, expiry is calculated from `createdTimestamp + lifeMoments × 3600`.
-
 ## Repository Structure
 
 ```
@@ -355,13 +360,13 @@ evernode-cluster-manager/
 │   ├── dist/
 │   │   └── index.js             ← compiled output (deployed to cluster)
 │   └── package.json
+├── config/
+│   └── .env.example             ← configuration reference
 ├── CHANGELOG.md
 └── README.md
 ```
 
 ## Build Process
-
-When making changes, always follow this order:
 
 **If you changed `evernode-client-cluster-manager-pkg/src/index.js`:**
 ```bash
@@ -384,29 +389,23 @@ node client/cluster-manager.js
 
 ## Key Concepts
 
-**Consensus threshold:** Default 65%. Deliberately lower than Evernode's default 80% to allow nodes to be offline during upgrades without blocking operations.
+**Auto-failover:** `getActivePeer()` tries `PREFERRED_PEER` first, then falls back through `cluster-nodes.json` in order. The active peer updates automatically on failover and is saved as `LAST_NODE`.
 
-**Bootstrap peer selection:** When adding a node, the running cluster is queried via `getBootstrapPeer` to select the most stable peer. Original deploy nodes are preferred over promoted nodes. The available peers are displayed and can be overridden. The selected peer is used as the single `known_peers` entry in the acquire init config to stay within the Xahau memo size limit.
+**Consensus threshold:** Default 65%. Deliberately lower than Evernode's default 80% to allow nodes to be offline during upgrades.
 
-**Memo size limit:** Xahau transactions have a hard 1KB memo limit. The cluster manager enforces: 1 UNL pubkey and max 2 peers in override configs, 1 peer in init configs. `cluster.info` is a bundle file with no size constraint and contains the full UNL peer list.
+**Bootstrap peer selection:** `PREFERRED_BOOTSTRAP` is used first. Falls back to `getBootstrapPeer` cluster recommendation, then `stat.peers[0]`.
 
-**Full peer mesh:** After every node addition, removal, or promotion, all nodes receive the complete UNL peer list in `patch.cfg` `mesh.known_peers` via `ctx.updateConfig()`. This ensures cold restarts can always find live peers regardless of which bootstrap peer was originally used.
+**Memo size limit:** Xahau transactions have a hard 1KB memo limit. 1 UNL pubkey and max 2 peers in override configs, 1 peer in init configs. `cluster.info` is a bundle file with no size constraint.
 
-**Stale node pruning:** Nodes registered as non-UNL that never send MATURED within 5 moments are automatically removed from `cluster.json` by the contract. This prevents ghost entries accumulating from failed add attempts.
+**Full peer mesh:** After every node addition, removal, or promotion, all nodes receive the complete UNL peer list in `patch.cfg` `mesh.known_peers` via `ctx.updateConfig()`.
 
-**Adding nodes:** The new node receives a minimal bootstrap config (1 peer, 1 UNL key) at acquire time. It syncs full cluster state automatically from its first peer connection via HotPocket's built-in sync mechanism. `cluster.info` contains the full UNL peer list for the MATURED flow.
+**Stale node pruning:** Nodes registered as non-UNL that never send MATURED within 5 moments are automatically removed from `cluster.json`.
 
-**Ghost peer cleanup (resolved as of npm package 1.2.1):** When a node is removed via `opRemoveNode`, the contract atomically cleans three layers on every UNL node: the UNL itself, `patch.cfg.known_peers`, and hpcore's in-memory `req_known_remotes` retry queue. The req_known_remotes flush uses `ctx.updatePeers([], [peerStr])` which routes through hpcore's FORCE-mode update path — surgical, removes only the named peer, safe to fire simultaneously across all UNL nodes during the consensus round. The earlier `purgePeers` handler (OVERWRITE mode via `ctx.updatePeers(peers, "*")`) was removed in npm 1.2.2: it cleared the entire peer table and closed all live sessions, which collapsed the cluster when every UNL node ran it simultaneously. There is no remaining unsafe code path for peer cleanup.
+**Ghost peer cleanup:** `removeNode` atomically cleans the UNL, `patch.cfg.known_peers`, and hpcore's `req_known_remotes` using FORCE-mode `ctx.updatePeers([], [peerStr])`.
 
 **Vote status:** `synced` = healthy consensus. In HP debug logs `Vote status: 3` is the synced state code.
 
-**Log access:** All logs and configs can be read remotely from any node via contract read handlers — no SSH or host filesystem access needed.
-
-**Expiry alerts:** Option 5 warns when nodes are within 6 hours of expiry. Configure via `ALERT_HOURS` in your project `.env`.
-
-**Heartbeat filter:** The host finder only returns hosts with a proven heartbeat in each of the last 3 hourly windows, ensuring consistently active hosts.
-
-**Reporting bad hosts:** After finding hosts (option 7) or removing a node (option 4), enter the full host Xahau address to report a host that failed to accept a contract or has closed ports. Reported hosts are excluded for 7 days.
+**Config-only upgrades:** Round time changes deploy a bundle without bumping the contract version. The `post_exec.sh` applies changes to `patch.cfg` via `jq`. hpcore reads `consensus.roundtime` dynamically — takes effect within one consensus round.
 
 ## Host Discovery API
 
@@ -419,26 +418,23 @@ HOST_API_URL=http://your-api:3001
 XAHAU_WS=ws://localhost:6008
 ```
 
-`XAHAU_WS` is used for host slot verification before committing a lease payment, and for lease extension transactions.
-
 ## Known Issues
 
 ### Extend lease decimal precision bug (upstream)
 
-`extendLease` fails with `TRANSACTION_FAILURE` when extending by more than 
-1 moment on hosts with certain leaseAmount values (e.g. 0.00007). JavaScript 
-floating point multiplication produces imprecise results — 
-23 * 0.00007 = 0.0016099999999999999 — which exceeds Xahau's decimal 
-precision limit. Single-moment extensions always succeed.
+`extendLease` fails with `TRANSACTION_FAILURE` when extending by more than 1 moment on hosts with certain leaseAmount values (e.g. `0.00007`). JavaScript floating point multiplication produces imprecise results — `23 * 0.00007 = 0.0016099999999999999` — which exceeds Xahau's decimal precision limit. Single-moment extensions always succeed.
 
-A fix has been submitted upstream: [evernode-js-client PR #XXX](link).
+Fix submitted upstream: [EvernodeXRPL/evernode-js-client#244](https://github.com/EvernodeXRPL/evernode-js-client/pull/244).
 
-**Local workaround:** patch the installed evdevkit:
+**Local workaround:**
 ```bash
 sed -i 's/moments \* uriInfo\.leaseAmount/parseFloat((moments * uriInfo.leaseAmount).toFixed(8))/' /usr/lib/node_modules/evdevkit/node_modules/evernode-js-client/index.js
 ```
 
-What's the PR number from GitHub?
+### Log level change requires hpcore update
+
+Changing log level via Cluster Settings writes to `patch.cfg` correctly but does not take effect on the running hpcore process — hpcore reads log level only at startup. A fix has been submitted upstream: [EvernodeXRPL/hpcore](https://github.com/EvernodeXRPL/hpcore). The log level menu option will be re-added once the fix is merged and deployed to Evernode hosts. Round time changes are not affected — hpcore reads `consensus.roundtime` dynamically.
+
 ### evdevkit cluster-create host deduplication bug
 
 There is a known bug in `evdevkit cluster-create` where the chunk-size allocation algorithm can place two nodes on the same host when that host has more than 1 available slot. The cluster manager mitigates this by:
@@ -455,9 +451,7 @@ cd patches && bash apply-patch1.sh
 
 ### Peer port compliance
 
-Not all Evernode hosts have their peer port open to inbound connections from unknown nodes. The cluster manager mitigates this by using the `getBootstrapPeer` handler to select a known-good peer from the running cluster rather than a random peer from the status output.
-
-Future versions will integrate peer port compliance data from the Host Discovery API to further improve bootstrap peer selection.
+Not all Evernode hosts have their peer port open to inbound connections from unknown nodes. The cluster manager mitigates this by using the `getBootstrapPeer` handler to select a known-good peer from the running cluster.
 
 ## Important Notes
 
@@ -468,4 +462,4 @@ Future versions will integrate peer port compliance data from the Host Discovery
 - Backups of contract state are created automatically before each upgrade (last 5 kept)
 - If an upgrade fails, `post_exec.sh` automatically rolls back `patch.cfg`
 - When managing large clusters (7+ nodes), stagger lease expiry times to protect consensus against simultaneous node loss
-- Set `DEBUG=true` in `~/.evernode-clusters/.env` to enable debug logging. All console output is mirrored to `~/.evernode-clusters/cluster-manager.log` with timestamps. Log rotates at 2MB, keeping one previous log as `cluster-manager.log.1`. Remove or set `DEBUG=false` to disable.
+- Set `DEBUG=true` in `~/.evernode-clusters/.env` to enable debug logging to `~/.evernode-clusters/cluster-manager.log`. Log rotates at 2MB.

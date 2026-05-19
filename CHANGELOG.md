@@ -1,6 +1,40 @@
 # Evernode Cluster Manager — Changelog
 
 ---
+## v3.3.0 (2026-05-19)
+
+### cluster-manager.js
+
+**Auto-failover when primary peer is unreachable**
+- `getActivePeer()` replaces direct `getStatus(ip, port)` calls at the entry point of every operation. On failure it automatically tries `PREFERRED_PEER` first, then falls back through all nodes in `cluster-nodes.json` in order until one responds. Updates `ip`/`port` and saves `LAST_NODE` when a failover occurs. Throws a clear error only if no nodes are reachable. Previously a dead primary peer would block all operations with a connection timeout.
+
+**Cluster Settings (option 10)**
+- New menu option providing a sub-menu for live cluster configuration:
+  - **Change active peer** — select from all cluster nodes by number or enter `domain:port`. Saves as `PREFERRED_PEER` in project `.env` and updates the active connection immediately.
+  - **Change bootstrap peer** — select the preferred peer for new node acquisitions. Saves as `PREFERRED_BOOTSTRAP` in project `.env`. Used by `opAddNode` when acquiring new nodes.
+  - **Change round time** — enter a new roundtime in ms (1000–3600000). Deploys a config-only bundle upgrade to all nodes via `submitConfigUpgrade()`. Takes effect within one consensus round without a version bump or code change. Confirmed working on live cluster.
+  - ~~Change log level~~ — removed pending hpcore PR [EvernodeXRPL/hpcore#xxx](https://github.com/EvernodeXRPL/hpcore). Log level is only read at hpcore startup and cannot be changed dynamically on the current released binary. Will be re-added once the PR is merged and deployed.
+
+**`submitConfigUpgrade()` helper**
+- Shared helper for config-only bundle upgrades. Bundles and deploys the current contract with an `hp.cfg.override` file containing the config change, then polls for `voteStatus === synced`. Does not bump the contract version string. Used by roundtime change in Cluster Settings.
+
+**`PREFERRED_PEER` and `PREFERRED_BOOTSTRAP` support**
+- Both settings are saved to and loaded from the project `.env` file, persisting across sessions. `PREFERRED_PEER` is tried first in `getActivePeer()`. `PREFERRED_BOOTSTRAP` is used by `opAddNode` before querying the cluster for a bootstrap peer recommendation.
+
+**`TOOL_VERSION`** bumped to `v3.3.0`.
+
+### npm package (evernode-client-cluster-manager@1.3.1)
+
+- Dynamic log level and roundtime in `handleUpgrade` via `hp.cfg.override` — see npm CHANGELOG for details.
+- DEP0128 deprecation warning suppressed — `exports` field added to `package.json`.
+
+### contract/src/index.js
+
+- Version bumped to `1.2.1`.
+
+---
+
+
 ## v3.2.1 (2026-05-19)
 
 ### cluster-manager.js

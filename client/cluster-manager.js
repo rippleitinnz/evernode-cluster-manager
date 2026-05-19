@@ -10,7 +10,7 @@
 
 'use strict';
 
-const TOOL_VERSION = 'v3.2.0';
+const TOOL_VERSION = 'v3.3.0';
 
 const path         = require('path');
 const fs           = require('fs');
@@ -202,8 +202,12 @@ const loadProjectEnv = () => {
 
 const saveProjectMeta = (meta) => {
     let env = fs.readFileSync(ENV_FILE, 'utf8');
-    if (meta.contractId) { env = env.replace(/^CONTRACT_ID=.*\n?/m, ''); env += `\nCONTRACT_ID=${meta.contractId}`; }
-    if (meta.lastNode)   { env = env.replace(/^LAST_NODE=.*\n?/m, '');   env += `\nLAST_NODE=${meta.lastNode}`; }
+    if (meta.contractId)       { env = env.replace(/^CONTRACT_ID=.*\n?/m, '');        env += `\nCONTRACT_ID=${meta.contractId}`; }
+    if (meta.lastNode)         { env = env.replace(/^LAST_NODE=.*\n?/m, '');          env += `\nLAST_NODE=${meta.lastNode}`; }
+    if (meta.preferredPeer !== undefined)      { env = env.replace(/^PREFERRED_PEER=.*\n?/m, '');      if (meta.preferredPeer) env += `\nPREFERRED_PEER=${meta.preferredPeer}`; }
+    if (meta.preferredBootstrap !== undefined) { env = env.replace(/^PREFERRED_BOOTSTRAP=.*\n?/m, ''); if (meta.preferredBootstrap) env += `\nPREFERRED_BOOTSTRAP=${meta.preferredBootstrap}`; }
+    if (meta.roundtime)        { env = env.replace(/^HP_ROUNDTIME=.*\n?/m, '');       env += `\nHP_ROUNDTIME=${meta.roundtime}`; }
+    if (meta.logLevel)         { env = env.replace(/^HP_LOG_LEVEL=.*\n?/m, '');       env += `\nHP_LOG_LEVEL=${meta.logLevel}`; }
     fs.writeFileSync(ENV_FILE, env.trim() + '\n');
 };
 
@@ -214,6 +218,53 @@ const loadNodes = () => {
     return [];
 };
 const saveNodes = (nodes) => fs.writeFileSync(NODES_FILE, JSON.stringify(nodes, null, 2));
+// ── Active peer with auto-failover ───────────────────────────
+/**
+ * getActivePeer — tries PREFERRED_PEER first, then falls back through
+ * cluster-nodes.json in order until one responds. Updates ip/port and
+ * saves lastNode on failover. Throws if no node is reachable.
+ */
+const getActivePeer = async () => {
+    const preferred = process.env.PREFERRED_PEER;
+    const nodes = loadNodes();
+    const candidates = [];
+    if (preferred) {
+        const parts = preferred.split(':');
+        if (parts.length === 2) candidates.push({ domain: parts[0], userPort: parseInt(parts[1]), preferred: true });
+    }
+    for (const n of nodes) {
+        if (n.domain && n.userPort) {
+            const key = `${n.domain}:${n.userPort}`;
+            if (!candidates.find(c => `${c.domain}:${c.userPort}` === key))
+                candidates.push({ domain: n.domain, userPort: n.userPort });
+        }
+    }
+    // Always include current ip:port if not already in list
+    if (ip && port) {
+        const key = `${ip}:${port}`;
+        if (!candidates.find(c => `${c.domain}:${c.userPort}` === key))
+            candidates.unshift({ domain: ip, userPort: parseInt(port) });
+    }
+    for (const c of candidates) {
+        try {
+            const stat = await getStatus(c.domain, String(c.userPort));
+            if (stat) {
+                const newKey = `${c.domain}:${c.userPort}`;
+                const oldKey = `${ip}:${port}`;
+                if (newKey !== oldKey) {
+                    const reason = c.preferred ? '(preferred)' : '(auto-failover)';
+                    console.log(`  ✓ Active peer: ${c.domain}:${c.userPort} ${reason}`);
+                    ip = c.domain;
+                    port = String(c.userPort);
+                    saveProjectMeta({ lastNode: `${ip}:${port}` });
+                }
+                return stat;
+            }
+        } catch {}
+    }
+    throw new Error('No reachable nodes found in cluster. Check node status or use Cluster Settings to change active peer.');
+};
+
 // Only reconcile cluster-nodes.json when cluster is fully synced and UNL is stable.
 // Never strip records during a crisis — only remove nodes that have cleanly left the UNL
 // and where the remaining UNL count is >= 3 (minimum viable cluster).
@@ -906,7 +957,7 @@ const checkClusterHealth = async (nodes) => {
 const opStatus = async () => {
     console.log('\n  Fetching cluster status...');
     try {
-        const stat = await getStatus(ip, port);
+        const stat = await getActivePeer();
         let nodes = loadNodes();
         const reconciled = reconcileNodes(nodes, stat.currentUnl, stat.voteStatus);
         if (reconciled.length !== nodes.length && stat.voteStatus === 'synced' && stat.currentUnl.length >= 3) {
@@ -1009,7 +1060,7 @@ const opUpdateContract = async () => {
     console.log('\n── Update Contract ──────────────────────────────────');
     let stat;
     try {
-        stat = await getStatus(ip, port);
+        stat = await getActivePeer();
         if (stat.voteStatus !== 'synced') { console.error('  ✗ Cluster not synced. Aborting.'); return; }
         console.log(`  ✓ Synced. UNL=${stat.currentUnl.length}`);
     } catch(e) { console.error(`  ✗ ${e.message}`); return; }
@@ -1067,7 +1118,7 @@ const opAddNode = async () => {
     console.log('\n── Add Node ─────────────────────────────────────────');
     let stat;
     try {
-        stat=await getStatus(ip,port);
+        stat=await getActivePeer();
         if (stat.voteStatus!=='synced') { console.error('  ✗ Cluster not synced. Aborting.'); return; }
         console.log(`  ✓ Synced. UNL=${stat.currentUnl.length}`);
     } catch(e) { console.error(`  ✗ ${e.message}`); return; }
@@ -1296,7 +1347,7 @@ const opRemoveNode = async () => {
     console.log('\n── Remove Node ──────────────────────────────────────');
     let stat;
     try {
-        stat=await getStatus(ip,port);
+        stat=await getActivePeer();
         if (stat.voteStatus!=='synced') { console.error('  ✗ Cluster not synced. Aborting.'); return; }
         console.log(`  ✓ Synced. UNL=${stat.currentUnl.length}:`);
         const nodes = loadNodes();
@@ -1637,7 +1688,7 @@ const opReadLog = async () => {
     console.log('\n── Read Node Log ────────────────────────────────────');
     let stat;
     try {
-        stat = await getStatus(ip, port);
+        stat = await getActivePeer();
         const nodes = loadNodes();
         stat.currentUnl.forEach((pk,i)=>{ const n=nodes.find(n=>n.pubkey===pk); console.log(`    [${i}] ${pk.slice(0,20)}… ${n?n.domain:'(unknown)'} port:${n?n.userPort:'?'}`); });
     } catch(e) { console.error(`  ✗ ${e.message}`); return; }
@@ -1766,6 +1817,160 @@ const opReadLog = async () => {
 
 // ── Report Host ──────────────────────────────────────────────
 
+/**
+ * submitConfigUpgrade — bundles and deploys contract with current .env values.
+ * Used for config-only changes (roundtime, log level) that don't change contract code.
+ * Does NOT bump the version string. Polls for voteStatus===synced after deploy.
+ */
+const submitConfigUpgrade = async (label, overrideCfg = {}) => {
+    console.log(`  Deploying config change: ${label}...`);
+    const stat = await getActivePeer();
+    if (stat.voteStatus !== 'synced') throw new Error('Cluster not synced.');
+    // Write override cfg to temp file and set EV_HP_OVERRIDE_CFG_PATH for evdevkit bundle
+    let overridePath = null;
+    if (Object.keys(overrideCfg).length > 0) {
+        overridePath = path.join(PROJECT_DIR, 'config-override-temp.cfg');
+        fs.writeFileSync(overridePath, JSON.stringify(overrideCfg, null, 2));
+        process.env.EV_HP_OVERRIDE_CFG_PATH = overridePath;
+        console.log(`  ✓ Override config: ${JSON.stringify(overrideCfg)}`);
+    } else {
+        delete process.env.EV_HP_OVERRIDE_CFG_PATH;
+    }
+    const builtIndex = path.join(TOOL_CONTRACT, 'index.js');
+    fs.copyFileSync(builtIndex, path.join(CONTRACT_DIR, 'index.js'));
+    const distNodeModules = path.join(TOOL_CONTRACT, 'node_modules');
+    if (fs.existsSync(distNodeModules)) {
+        execSync(`cp -r "${distNodeModules}" "${CONTRACT_DIR}/"`, { encoding: 'utf8' });
+        ensureNccBundle(`${CONTRACT_DIR}/node_modules`);
+    }
+    const firstNode = stat.currentUnl[0];
+    execSync(
+        `${sudo}evdevkit bundle "${CONTRACT_DIR}" ${firstNode} /usr/bin/node -a index.js`,
+        { encoding: 'utf8', cwd: PROJECT_DIR, env: process.env }
+    );
+    // Clean up temp override file
+    if (overridePath && fs.existsSync(overridePath)) fs.unlinkSync(overridePath);
+    delete process.env.EV_HP_OVERRIDE_CFG_PATH;
+    const bundlePath = path.join(PROJECT_DIR, 'bundle', 'bundle.zip');
+    console.log(`  ✓ Bundle created. ${(fs.statSync(bundlePath).size/1024).toFixed(1)} KB`);
+    const bundle = fs.readFileSync(bundlePath).toString('base64');
+    console.log('  Sending upgrade...');
+    await submitInput(ip, port, { type: 'upgrade', bundle });
+    console.log('  ✓ Accepted. Waiting for cluster to resync...');
+    const roundtime = parseInt(process.env.HP_ROUNDTIME || 6000);
+    await pollUntil(async () => {
+        const s = await getStatus(ip, port);
+        process.stdout.write(`  voteStatus: ${s.voteStatus}          \r`);
+        return s.voteStatus === 'synced' ? s : null;
+    }, roundtime * 20);
+    console.log(`\n  ✓ Config change applied: ${label}`);
+};
+
+const opClusterSettings = async () => {
+    console.log('\n── Cluster Settings ─────────────────────────────────');
+    while (true) {
+        const preferred = process.env.PREFERRED_PEER || '(not set)';
+        const bootstrap = process.env.PREFERRED_BOOTSTRAP || '(not set)';
+        const roundtime = process.env.HP_ROUNDTIME || '5000';
+        console.log(`
+  Active peer      : ${preferred}`);
+        console.log(`  Bootstrap peer   : ${bootstrap}`);
+        console.log(`  Round time       : ${roundtime}ms`);
+        console.log('');
+        console.log('    1. Change active peer');
+        console.log('    2. Change bootstrap peer');
+        console.log('    3. Change round time');
+        console.log('    0. Back');
+        console.log('');
+        const choice = (await ask('  Choice: ')).trim();
+        if (choice === '0') break;
+
+        if (choice === '1') {
+            // Show all available nodes for selection
+            const nodes = loadNodes();
+            if (nodes.length) {
+                nodes.forEach((n, i) => {
+                    const marker = `${n.domain}:${n.userPort}` === preferred ? ' (current)' : '';
+                    console.log(`    ${i + 1}. ${n.domain}:${n.userPort}${marker}`);
+                });
+                console.log('');
+            }
+            const input = (await ask('  Enter domain:port or list number (Enter to clear): ')).trim();
+            if (!input) {
+                saveProjectMeta({ preferredPeer: '' });
+                delete process.env.PREFERRED_PEER;
+                console.log('  ✓ Active peer preference cleared.');
+            } else {
+                let peer = input;
+                if (/^\d+$/.test(input)) {
+                    const idx = parseInt(input) - 1;
+                    if (idx >= 0 && idx < nodes.length) peer = `${nodes[idx].domain}:${nodes[idx].userPort}`;
+                    else { console.log('  ✗ Invalid selection.'); continue; }
+                }
+                if (!peer.includes(':')) { console.log('  ✗ Format must be domain:port.'); continue; }
+                saveProjectMeta({ preferredPeer: peer });
+                process.env.PREFERRED_PEER = peer;
+                const parts = peer.split(':');
+                ip = parts[0]; port = parts[1];
+                console.log(`  ✓ Active peer set to ${peer}.`);
+            }
+        }
+
+        else if (choice === '2') {
+            const nodes = loadNodes().filter(n => n.domain && n.peerPort);
+            if (nodes.length) {
+                nodes.forEach((n, i) => {
+                    const peerStr = `${n.domain}:${n.peerPort}`;
+                    const marker = peerStr === bootstrap ? ' (current)' : '';
+                    console.log(`    ${i + 1}. ${peerStr}${marker}`);
+                });
+                console.log('');
+            }
+            const input = (await ask('  Enter domain:peerPort or list number (Enter to clear): ')).trim();
+            if (!input) {
+                saveProjectMeta({ preferredBootstrap: '' });
+                delete process.env.PREFERRED_BOOTSTRAP;
+                console.log('  ✓ Bootstrap peer preference cleared.');
+            } else {
+                let peer = input;
+                if (/^\d+$/.test(input)) {
+                    const idx = parseInt(input) - 1;
+                    if (idx >= 0 && idx < nodes.length) peer = `${nodes[idx].domain}:${nodes[idx].peerPort}`;
+                    else { console.log('  ✗ Invalid selection.'); continue; }
+                }
+                if (!peer.includes(':')) { console.log('  ✗ Format must be domain:peerPort.'); continue; }
+                saveProjectMeta({ preferredBootstrap: peer });
+                process.env.PREFERRED_BOOTSTRAP = peer;
+                console.log(`  ✓ Bootstrap peer set to ${peer}.`);
+            }
+        }
+
+        else if (choice === '3') {
+            const input = (await ask(`  Round time in ms (current: ${roundtime}, min: 1000, max: 3600000): `)).trim();
+            if (!input) continue;
+            const rt = parseInt(input);
+            if (isNaN(rt) || rt < 1000 || rt > 3600000) { console.log('  ✗ Invalid value.'); continue; }
+            try {
+                process.env.HP_ROUNDTIME = String(rt);
+                saveProjectMeta({ roundtime: String(rt) });
+                await submitConfigUpgrade(`roundtime=${rt}ms`, {
+                    contract: { consensus: { roundtime: rt } }
+                });
+            } catch(e) {
+                console.error(`  ✗ Failed: ${e.message}`);
+                // Restore previous value on failure
+                process.env.HP_ROUNDTIME = roundtime;
+            }
+        }
+
+
+        else {
+            console.log('  Invalid choice.');
+        }
+    }
+    console.log('─────────────────────────────────────────────────────\n');
+};
+
 const opReportHost = async () => {
     console.log('\n── Report a Host ────────────────────────────────────');
     const nodes = loadNodes();
@@ -1804,7 +2009,8 @@ const managementMenu = async () => {
         console.log('    7. Find available hosts');
         console.log('    8. Read node log');
         console.log('    9. Report problematic host');
-        console.log('   10. Switch project');
+        console.log('   10. Cluster settings');
+        console.log('   11. Switch project');
         console.log('    0. Exit');
         console.log('');
         const choice=(await ask('  Choice: ')).trim();
@@ -1820,7 +2026,8 @@ const managementMenu = async () => {
             case '7': await opFindHosts(); break;
             case '8': await opReadLog(); break;
             case '9': await opReportHost(); break;
-            case '10': return 'switch';
+            case '10': await opClusterSettings(); break;
+            case '11': return 'switch';
             case '0': console.log('  Goodbye.\n'); rl.close(); process.exit(0);
             default: console.log('  Invalid choice.\n');
         }
