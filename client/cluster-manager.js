@@ -10,7 +10,7 @@
 
 'use strict';
 
-const TOOL_VERSION = 'v3.4.0';
+const TOOL_VERSION = 'v3.4.1';
 
 const path         = require('path');
 const fs           = require('fs');

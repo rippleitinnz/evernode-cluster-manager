@@ -22,6 +22,15 @@ A single tool for deploying and managing multiple HotPocket smart contract clust
 - Live cluster configuration via Cluster Settings — active peer, bootstrap peer, round time
 - Emergency recovery via Tools menu — deploy recovery contract, destroy cluster, reset credentials
 
+## What's new in v3.4.1
+
+**`mesh.idle_timeout` auto-managed.** HotPocket peer connections time out after `mesh.idle_timeout` ms of inactivity (default 120000ms). With `stage_slice` at 25%, the safe maximum roundtime is `mesh.idle_timeout ÷ 0.25 = 480000ms`. Exceeding this causes peers to disconnect during stage waits, leading to permanent consensus failure.
+
+The tool now manages this automatically:
+- At project creation, if roundtime > 480000ms, `mesh.idle_timeout` is calculated as `ceil(roundtime × 0.25 × 1.01)` and written into `hp-init.cfg` so every node starts with the correct value.
+- When adding a node, the same calculation applies to the per-node init config.
+- In Cluster Settings, roundtime changes are hard-capped at `floor(current mesh.idle_timeout ÷ 0.25)`. The safe maximum is shown in the prompt. Values exceeding it are refused.
+
 ## What's new in v3.4.0
 
 **Price stability in host finder.** The host table now shows a `Price Stability` column. Stable hosts show `✓ price stable Nd`. Hosts that changed price show direction, magnitude and recency — `▲ +70%  3d ago` or `▼ -15%  12d ago  (2x/30d)`. Data sourced from the `/hosts/:address/price-history` endpoint on the Host Discovery API.
