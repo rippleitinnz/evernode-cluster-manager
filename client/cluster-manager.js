@@ -612,9 +612,20 @@ ALERT_MIN_MOMENTS=12
 `, { mode: 0o600 });
 
     // Write hp-init.cfg
+    // If roundtime exceeds safe threshold for default mesh.idle_timeout (120000ms),
+    // automatically set mesh.idle_timeout to roundtime * stage_slice% * 1.01 headroom.
+    const rtMs = parseInt(roundtime);
+    const stageSlicePct = 25; // default stage_slice
+    const defaultMeshIdleTimeout = 120000;
+    const safeMaxRoundtime = Math.floor(defaultMeshIdleTimeout / (stageSlicePct / 100));
+    const meshIdleTimeout = rtMs > safeMaxRoundtime
+        ? Math.ceil(rtMs * (stageSlicePct / 100) * 1.01)
+        : defaultMeshIdleTimeout;
+    if (rtMs > safeMaxRoundtime)
+        console.log(`  ✓ mesh.idle_timeout auto-set to ${meshIdleTimeout}ms to support roundtime ${rtMs}ms`);
     fs.writeFileSync(INITCFG, JSON.stringify({
-        contract: { consensus: { roundtime: parseInt(roundtime), threshold: parseInt(threshold) } },
-        mesh: { peer_discovery: { enabled: peerDiscovery==='true' } },
+        contract: { consensus: { roundtime: rtMs, threshold: parseInt(threshold) } },
+        mesh: { peer_discovery: { enabled: peerDiscovery==='true' }, idle_timeout: meshIdleTimeout },
         log: { log_level: logLevel }
     }, null, 2));
 
@@ -1220,8 +1231,21 @@ const opAddNode = async () => {
     } catch(e) {
         console.log(`  ⚠  Could not get bootstrap peer from cluster: ${e.message}`);
     }
-    // Recommended: PREFERRED_BOOTSTRAP if set, otherwise contract recommendation, otherwise first peer
-    const recommended = process.env.PREFERRED_BOOTSTRAP || contractPeer
+    // Recommended: PREFERRED_BOOTSTRAP if set and reachable, otherwise contract recommendation, otherwise first peer.
+    // PREFERRED_BOOTSTRAP is health-checked via TCP before use — a dead preferred peer falls through to contractPeer.
+    // This prevents a stale PREFERRED_BOOTSTRAP from being written into initCfg as a dead bootstrap seed.
+    let preferredBootstrap = null;
+    if (process.env.PREFERRED_BOOTSTRAP) {
+        const [pbDomain, pbPort] = process.env.PREFERRED_BOOTSTRAP.split(':');
+        try {
+            execSync(`nc -zw3 ${pbDomain} ${pbPort} 2>/dev/null`);
+            preferredBootstrap = process.env.PREFERRED_BOOTSTRAP;
+            console.log(`  ✓ PREFERRED_BOOTSTRAP reachable: ${preferredBootstrap}`);
+        } catch {
+            console.log(`  ⚠  PREFERRED_BOOTSTRAP unreachable (${process.env.PREFERRED_BOOTSTRAP}) — falling back to cluster recommendation`);
+        }
+    }
+    const recommended = preferredBootstrap || contractPeer
         || (stat.peers.length > 0 ? stat.peers[0] : `${ip}:${parseInt(port)-1}`);
     // Build deduplicated candidate list — recommended first
     const seen = new Set();
@@ -1258,7 +1282,11 @@ const opAddNode = async () => {
         },
         mesh: {
             peer_discovery: { enabled: process.env.HP_PEER_DISCOVERY==='true' },
-            known_peers: [bootstrapPeer]
+            known_peers: [bootstrapPeer],
+            // Auto-set idle_timeout if roundtime exceeds safe threshold for default 120000ms.
+            idle_timeout: roundtime > 480000
+                ? Math.ceil(roundtime * 0.25 * 1.01)
+                : 120000
         },
         log: { log_level: logLevel }
     };
@@ -2159,16 +2187,44 @@ const opClusterSettings = async () => {
         }
 
         else if (choice === '3') {
-            const input = (await ask(`  Round time in ms (current: ${roundtime}, min: 1000, max: 3600000): `)).trim();
+            // Read current mesh.idle_timeout and stage_slice from cluster to calculate safe max roundtime.
+            // Safe max = floor(mesh.idle_timeout / stage_slice%) — exceeding this causes peer disconnections.
+            let meshIdleTimeout = 120000;
+            let stageSlice = 25;
+            try {
+                const cfgRaw = await readCfgFromNode(ip, port);
+                if (cfgRaw && cfgRaw.mesh && cfgRaw.mesh.idle_timeout) meshIdleTimeout = cfgRaw.mesh.idle_timeout;
+                if (cfgRaw && cfgRaw.contract && cfgRaw.contract.consensus && cfgRaw.contract.consensus.stage_slice)
+                    stageSlice = cfgRaw.contract.consensus.stage_slice;
+            } catch(e) { /* use defaults */ }
+            const safeMax = Math.floor(meshIdleTimeout / (stageSlice / 100));
+            const input = (await ask(`  Round time in ms (current: ${roundtime}, min: 1000, max: 3600000, safe max: ${safeMax}): `)).trim();
             if (!input) continue;
             const rt = parseInt(input);
             if (isNaN(rt) || rt < 1000 || rt > 3600000) { console.log('  ✗ Invalid value.'); continue; }
+            // Refuse if roundtime exceeds safe max for current mesh.idle_timeout.
+            // Exceeding this causes permanent consensus failure — peers disconnect during stage waits.
+            // mesh.idle_timeout can only be changed at acquire time (written into hp-init.cfg).
+            // Once a cluster is running, the safe max is fixed until nodes are re-acquired.
+            if (rt > safeMax) {
+                console.log(`  ✗ Round time ${rt}ms exceeds safe maximum of ${safeMax}ms.`);
+                console.log(`  ✗ Current mesh.idle_timeout=${meshIdleTimeout}ms limits roundtime to ${safeMax}ms.`);
+                console.log(`  ✗ To use longer roundtimes, set a higher roundtime at project creation —`);
+                console.log(`  ✗ mesh.idle_timeout is automatically calculated and set at node acquire time.`);
+                continue;
+            }
             try {
                 process.env.HP_ROUNDTIME = String(rt);
                 saveProjectMeta({ roundtime: String(rt) });
-                await submitConfigUpgrade(`roundtime=${rt}ms`, {
-                    contract: { consensus: { roundtime: rt } }
-                });
+                // Auto-include mesh.idle_timeout if roundtime exceeds safe threshold.
+                // Uses 1% headroom: idle_timeout = ceil(roundtime * stage_slice% * 1.01)
+                const overrideCfg = { contract: { consensus: { roundtime: rt } } };
+                if (rt > safeMax) {
+                    const newMeshIdleTimeout = Math.ceil(rt * (stageSlice / 100) * 1.01);
+                    overrideCfg.mesh = { idle_timeout: newMeshIdleTimeout };
+                    console.log(`  ✓ mesh.idle_timeout auto-set to ${newMeshIdleTimeout}ms`);
+                }
+                await submitConfigUpgrade(`roundtime=${rt}ms`, overrideCfg);
             } catch(e) {
                 console.error(`  ✗ Failed: ${e.message}`);
                 // Restore previous value on failure
