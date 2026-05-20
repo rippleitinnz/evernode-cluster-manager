@@ -24,12 +24,7 @@ A single tool for deploying and managing multiple HotPocket smart contract clust
 
 ## What's new in v3.4.1
 
-**`mesh.idle_timeout` auto-managed.** HotPocket peer connections time out after `mesh.idle_timeout` ms of inactivity (default 120000ms). With `stage_slice` at 25%, the safe maximum roundtime is `mesh.idle_timeout ÷ 0.25 = 480000ms`. Exceeding this causes peers to disconnect during stage waits, leading to permanent consensus failure.
-
-The tool now manages this automatically:
-- At project creation, if roundtime > 480000ms, `mesh.idle_timeout` is calculated as `ceil(roundtime × 0.25 × 1.01)` and written into `hp-init.cfg` so every node starts with the correct value.
-- When adding a node, the same calculation applies to the per-node init config.
-- In Cluster Settings, roundtime changes are hard-capped at `floor(current mesh.idle_timeout ÷ 0.25)`. The safe maximum is shown in the prompt. Values exceeding it are refused.
+**Roundtime safety cap in Cluster Settings.** Changing round time via option 10 → option 3 now enforces a hard maximum based on the cluster's current `mesh.idle_timeout` and `stage_slice`. With default settings (`mesh.idle_timeout=120000ms`, `stage_slice=25%`) the safe maximum is **480000ms**. Exceeding this causes peers to disconnect during stage waits, leading to permanent consensus failure with no recovery path. The safe maximum is displayed in the prompt and values above it are refused. To use longer roundtimes, `mesh.idle_timeout` must be set higher at node acquire time — a hpcore PR ([EvernodeXRPL/hpcore#414](https://github.com/EvernodeXRPL/hpcore/pull/414)) has been raised to make this dynamically changeable on a running cluster without restart.
 
 ## What's new in v3.4.0
 

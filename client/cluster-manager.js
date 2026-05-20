@@ -612,20 +612,9 @@ ALERT_MIN_MOMENTS=12
 `, { mode: 0o600 });
 
     // Write hp-init.cfg
-    // If roundtime exceeds safe threshold for default mesh.idle_timeout (120000ms),
-    // automatically set mesh.idle_timeout to roundtime * stage_slice% * 1.01 headroom.
-    const rtMs = parseInt(roundtime);
-    const stageSlicePct = 25; // default stage_slice
-    const defaultMeshIdleTimeout = 120000;
-    const safeMaxRoundtime = Math.floor(defaultMeshIdleTimeout / (stageSlicePct / 100));
-    const meshIdleTimeout = rtMs > safeMaxRoundtime
-        ? Math.ceil(rtMs * (stageSlicePct / 100) * 1.01)
-        : defaultMeshIdleTimeout;
-    if (rtMs > safeMaxRoundtime)
-        console.log(`  ✓ mesh.idle_timeout auto-set to ${meshIdleTimeout}ms to support roundtime ${rtMs}ms`);
     fs.writeFileSync(INITCFG, JSON.stringify({
-        contract: { consensus: { roundtime: rtMs, threshold: parseInt(threshold) } },
-        mesh: { peer_discovery: { enabled: peerDiscovery==='true' }, idle_timeout: meshIdleTimeout },
+        contract: { consensus: { roundtime: parseInt(roundtime), threshold: parseInt(threshold) } },
+        mesh: { peer_discovery: { enabled: peerDiscovery==='true' } },
         log: { log_level: logLevel }
     }, null, 2));
 
@@ -1282,11 +1271,7 @@ const opAddNode = async () => {
         },
         mesh: {
             peer_discovery: { enabled: process.env.HP_PEER_DISCOVERY==='true' },
-            known_peers: [bootstrapPeer],
-            // Auto-set idle_timeout if roundtime exceeds safe threshold for default 120000ms.
-            idle_timeout: roundtime > 480000
-                ? Math.ceil(roundtime * 0.25 * 1.01)
-                : 120000
+            known_peers: [bootstrapPeer]
         },
         log: { log_level: logLevel }
     };
@@ -2216,15 +2201,9 @@ const opClusterSettings = async () => {
             try {
                 process.env.HP_ROUNDTIME = String(rt);
                 saveProjectMeta({ roundtime: String(rt) });
-                // Auto-include mesh.idle_timeout if roundtime exceeds safe threshold.
-                // Uses 1% headroom: idle_timeout = ceil(roundtime * stage_slice% * 1.01)
-                const overrideCfg = { contract: { consensus: { roundtime: rt } } };
-                if (rt > safeMax) {
-                    const newMeshIdleTimeout = Math.ceil(rt * (stageSlice / 100) * 1.01);
-                    overrideCfg.mesh = { idle_timeout: newMeshIdleTimeout };
-                    console.log(`  ✓ mesh.idle_timeout auto-set to ${newMeshIdleTimeout}ms`);
-                }
-                await submitConfigUpgrade(`roundtime=${rt}ms`, overrideCfg);
+                await submitConfigUpgrade(`roundtime=${rt}ms`, {
+                    contract: { consensus: { roundtime: rt } }
+                });
             } catch(e) {
                 console.error(`  ✗ Failed: ${e.message}`);
                 // Restore previous value on failure

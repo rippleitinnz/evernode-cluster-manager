@@ -5,20 +5,14 @@
 
 ### cluster-manager.js
 
-**`mesh.idle_timeout` auto-calculated at project creation**
-- When roundtime > 480000ms at project creation, `mesh.idle_timeout` is automatically calculated as `ceil(roundtime × stage_slice% × 1.01)` and written into `hp-init.cfg`. Every node acquires with the correct idle timeout from the start. No user interaction required. Example: roundtime 600000ms → `mesh.idle_timeout` auto-set to 151500ms.
-
-**`mesh.idle_timeout` auto-calculated in `opAddNode`**
-- Same calculation applied when adding nodes to an existing cluster — new nodes acquire with the correct `mesh.idle_timeout` matching the cluster's roundtime.
-
 **Hard cap on Cluster Settings roundtime change**
-- Roundtime changes via option 10 → option 3 now refuse values exceeding `floor(mesh.idle_timeout / stage_slice%)`. The current `mesh.idle_timeout` and `stage_slice` are read live from the cluster before displaying the prompt. Safe maximum is shown alongside the current and min values. Previously exceeding this limit caused permanent consensus failure with no recovery path.
+- Roundtime changes via option 10 → option 3 now refuse values exceeding `floor(mesh.idle_timeout / stage_slice%)`. The current `mesh.idle_timeout` and `stage_slice` are read live from the cluster before displaying the prompt. Safe maximum is displayed alongside min/current values. Previously exceeding this limit caused permanent consensus failure with no recovery path — peers disconnect during stage waits and the cluster cannot recover without terminating all nodes.
+- At default settings (`mesh.idle_timeout=120000ms`, `stage_slice=25%`) the safe maximum is **480000ms**. To use longer roundtimes, `mesh.idle_timeout` must be raised at node acquire time — a hpcore PR ([EvernodeXRPL/hpcore#414](https://github.com/EvernodeXRPL/hpcore/pull/414)) has been raised to make this dynamically changeable without restart.
 
 **`TOOL_VERSION`** bumped to `v3.4.1`.
 
 ### npm package (evernode-client-cluster-manager@1.3.4)
-
-- `mesh.idle_timeout` handling via `hp.cfg.override` — stored in `contract.config` and applied to both `patch.cfg` and `hp.cfg` via `post_exec.sh`. See npm CHANGELOG for details.
+- `mesh.idle_timeout` handling via `hp.cfg.override` — stored in `contract.config` and applied to both `patch.cfg` and `hp.cfg` via `post_exec.sh`. Ready for when hpcore PR #414 is merged.
 
 ---
 
