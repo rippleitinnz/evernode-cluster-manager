@@ -10,7 +10,7 @@
 
 'use strict';
 
-const TOOL_VERSION = 'v3.3.0';
+const TOOL_VERSION = 'v3.4.0';
 
 const path         = require('path');
 const fs           = require('fs');
@@ -413,18 +413,53 @@ const findHostsViaAPI = async (apiUrl, minSlots, targetCount, minRep, includeUns
     const ageTxt = ageMin < 1 ? 'just now' : ageMin + ' min ago';
     console.log('\n  API returned ' + hosts.length + ' hosts (' + singleHosts.length + ' single-slot) | cache updated: ' + ageTxt);
 
+    // Always show in EVR — never drops. Consistent decimals throughout.
     const fmtEVR = (drops) => {
         if (!drops) return 'free?';
         const e = drops / 1000000;
-        if (e < 0.001) return drops + 'drops';
-        if (e < 1) return e.toFixed(4) + ' EVR';
+        if (e < 0.000001) return e.toFixed(8) + ' EVR';
+        if (e < 0.01)     return e.toFixed(6) + ' EVR';
+        if (e < 1)        return e.toFixed(4) + ' EVR';
         return e.toFixed(2) + ' EVR';
     };
     const fmtRep = (r) => r === null || r === undefined ? '?' : String(r);
 
-    console.log('  ' + hr(131));
-    console.log('  ' + '#'.padEnd(4) + 'Address'.padEnd(36) + 'Domain'.padEnd(25) + 'CC'.padEnd(5) + 'Avail'.padEnd(7) + 'Total'.padEnd(7) + 'Rep'.padEnd(6) + 'RAM'.padEnd(8) + 'Lease/hr'.padEnd(12) + 'Version');
-    console.log('  ' + hr(131));
+    // Enrich hosts with price stability data from API (parallel, best-effort)
+    const stabilityMap = {};
+    const apiUrlForStability = apiUrl.replace(/\/$/, '');
+    await Promise.all(hosts.map(async h => {
+        try {
+            const data = await fetchFromAPI(`${apiUrlForStability}/hosts/${h.address}/price-history`);
+            if (data.success) {
+                stabilityMap[h.address] = {
+                    stable:       data.priceStable,
+                    days:         data.daysSincePriceChange,
+                    changes30d:   data.priceChangeCount30d,
+                    prevDrops:    data.lastFivePrices?.[1]?.leaseDrops ?? null,
+                    currentDrops: data.currentLeaseDrops,
+                };
+            }
+        } catch {}
+    }));
+
+    // Stability: ✓ 38d | ▲ +70%  3d ago | ▼ -15%  12d ago  (2x/30d)
+    const fmtStability = (addr) => {
+        const s = stabilityMap[addr];
+        if (!s) return '?';
+        if (s.stable) return '✓ price stable ' + (s.days ?? '?') + 'd';
+        let arrow = '';
+        if (s.prevDrops && s.currentDrops && s.prevDrops !== s.currentDrops) {
+            const pct = Math.round(((s.currentDrops - s.prevDrops) / s.prevDrops) * 100);
+            arrow = s.currentDrops > s.prevDrops ? '▲ +' + pct + '%  ' : '▼ ' + pct + '%  ';
+        }
+        const recency = s.days !== null ? s.days + 'd ago' : '';
+        const freq    = s.changes30d > 1 ? '  (' + s.changes30d + 'x/30d)' : '';
+        return (arrow + recency + freq).trim();
+    };
+
+    console.log('  ' + hr(157));
+    console.log('  ' + '#'.padEnd(4) + 'Address'.padEnd(36) + 'Domain'.padEnd(25) + 'CC'.padEnd(5) + 'Avail'.padEnd(7) + 'Total'.padEnd(7) + 'Rep'.padEnd(6) + 'RAM'.padEnd(8) + 'Lease/hr'.padEnd(14) + 'Price Stability'.padEnd(28) + 'Version');
+    console.log('  ' + hr(157));
     hosts.forEach((h, i) => console.log(
         '  ' + String(i + 1).padEnd(4) +
         (h.address || '').padEnd(36) +
@@ -434,10 +469,11 @@ const findHostsViaAPI = async (apiUrl, minSlots, targetCount, minRep, includeUns
         String(h.maxInstances || 0).padEnd(7) +
         fmtRep(h.hostReputation).padEnd(6) +
         (h.ramMb ? Math.round(h.ramMb / 1024) + 'GB' : '?').padEnd(8) +
-        fmtEVR(h.leaseDrops).padEnd(12) +
+        fmtEVR(h.leaseDrops).padEnd(14) +
+        fmtStability(h.address).padEnd(28) +
         (h.version || '?')
     ));
-    console.log('  ' + hr(131));
+    console.log('  ' + hr(157));
     console.log('\n  ' + hosts.length + ' host(s) — ' + singleHosts.length + ' single-slot (recommended for deployment).');
     if (allowReport) console.log('  To report a bad host enter its full Xahau address.');
     console.log('');
@@ -871,14 +907,16 @@ const opDeploy = async () => {
         if (!connected) { ip = nodes[0].domain; port = String(nodes[0].user_port); }
 
         const nodeRecords = nodes.map(n => ({
-            pubkey           : n.pubkey,
-            name             : n.name,
-            host             : n.host,
-            domain           : n.domain,
-            userPort         : parseInt(n.user_port),
-            peerPort         : parseInt(n.peer_port),
-            createdTimestamp : n.created_timestamp,
-            lifeMoments      : n.life_moments
+            pubkey             : n.pubkey,
+            name               : n.name,
+            host               : n.host,
+            domain             : n.domain,
+            userPort           : parseInt(n.user_port),
+            peerPort           : parseInt(n.peer_port),
+            createdTimestamp   : n.created_timestamp,
+            lifeMoments        : n.life_moments,
+            // Price at deploy time — baseline for extend price change detection
+            acquiredLeaseDrops : n.lease_amount ? Math.round(parseFloat(n.lease_amount) * 1000000) : null,
         }));
         saveNodes(nodeRecords);
 
@@ -1198,7 +1236,6 @@ const opAddNode = async () => {
         const marker = p === recommended ? ' (recommended)' : '';
         console.log(`    ${i + 1}. ${p}${marker}`);
     });
-    });
     console.log('');
     const bpInput = (await ask(`  Select peer (1-${availablePeers.length}) or Enter to accept recommended: `)).trim();
     if (bpInput) {
@@ -1260,7 +1297,19 @@ const opAddNode = async () => {
         await submitInput(ip, port, { type: 'addNode', pubkey: pub, ip: dom, peerPort: parseInt(peer), userPort: parseInt(user), existingNodes });
         console.log('  ✓ Accepted. Saving node to cluster-nodes.json...');
         const nodes = loadNodes();
-        const newRecord = { pubkey: pub, name, host: extHost, domain: dom, userPort: parseInt(user), peerPort: parseInt(peer), createdTimestamp: ts, lifeMoments: parseInt(moments) };
+        // acquiredLeaseDrops — price paid at acquire time (drops). Used at extend time
+        // to detect price changes vs the originally agreed price, independent of stability window.
+        // leaseAmount is not in evdevkit acquire output — fetch from API using extHost.
+        let acquiredLeaseDrops = null;
+        try {
+            const priceApiUrl = process.env.HOST_API_URL || 'https://api.onledger.net';
+            const priceData = await fetchFromAPI(`${priceApiUrl}/hosts/${extHost}`);
+            if (priceData.success && priceData.host?.leaseDrops) {
+                acquiredLeaseDrops = priceData.host.leaseDrops;
+                console.log(`  ✓ Acquired lease price: ${(acquiredLeaseDrops / 1000000).toFixed(6)} EVR/moment`);
+            }
+        } catch { console.log('  ⚠  Could not fetch lease price from API — acquiredLeaseDrops not stored'); }
+        const newRecord = { pubkey: pub, name, host: extHost, domain: dom, userPort: parseInt(user), peerPort: parseInt(peer), createdTimestamp: ts, lifeMoments: parseInt(moments), acquiredLeaseDrops };
         nodes.push(newRecord);
         saveNodes(nodes);
         console.log('  ✓ Saved to cluster-nodes.json');
@@ -1510,6 +1559,64 @@ const opExtendLease = async () => {
         console.error(`  ✗ Could not connect to Xahau: ${e.message}`);
         return;
     }
+
+    // ── Price check before committing to extend ─────────────────
+    // Fetches current price from API and compares against acquiredLeaseDrops
+    // stored at acquire time. Warns if price has changed vs original regardless
+    // of stability window — stable-but-higher is still a price change.
+    const apiUrl = process.env.HOST_API_URL || 'https://api.onledger.net';
+    console.log('  Checking current lease prices...');
+    const priceWarnings = [];
+    for (const node of targets) {
+        if (!node.host) { console.log(`  ${(node.domain||'unknown').padEnd(32)} no host address — skipping price check`); continue; }
+        try {
+            const data = await fetchFromAPI(`${apiUrl}/hosts/${node.host}`);
+            if (data.success && data.host) {
+                const h = data.host;
+                const currentDrops = h.leaseDrops;
+                const evrPerMoment = currentDrops ? (currentDrops / 1000000) : null;
+                const totalEvr     = evrPerMoment ? (evrPerMoment * addMoments).toFixed(6) : '?';
+
+                // Compare current price vs price at acquire time
+                const originalDrops = node.acquiredLeaseDrops;
+                let priceNote = '';
+                if (originalDrops && currentDrops) {
+                    const origEvr = (originalDrops / 1000000).toFixed(6);
+                    if (currentDrops !== originalDrops) {
+                        const pct   = Math.round(((currentDrops - originalDrops) / originalDrops) * 100);
+                        const delta = currentDrops > originalDrops ? `▲ +${pct}%` : `▼ ${pct}%`;
+                        priceNote = `  ${delta} vs ${origEvr} EVR at acquire`;
+                        priceWarnings.push({ domain: node.domain || node.host, origEvr, currentEvr: evrPerMoment?.toFixed(6) });
+                    } else {
+                        priceNote = `  ✓ matches acquire price (${origEvr} EVR)`;
+                    }
+                } else if (!originalDrops) {
+                    priceNote = '  (no acquire price on record)';
+                }
+
+                const stability = h.priceStable === false
+                    ? `⚠ price changed ${h.priceChangeCount30d ?? '?'}x/30d`
+                    : `price stable ${h.daysSincePriceChange ?? '?'}d`;
+                console.log(`  ${(node.domain||'').slice(0,30).padEnd(32)} ${(evrPerMoment ? evrPerMoment.toFixed(6) + ' EVR/moment' : '?').padEnd(22)} ${stability.padEnd(18)} ~${totalEvr} EVR total${priceNote}`);
+            } else {
+                console.log(`  ${(node.domain||'').slice(0,30).padEnd(32)} price data unavailable`);
+            }
+        } catch { console.log(`  ${(node.domain||'').slice(0,30).padEnd(32)} price check failed (API unavailable)`); }
+    }
+    if (priceWarnings.length > 0) {
+        console.log(`\n  ⚠  ${priceWarnings.length} host(s) are charging more than your original acquire price:`);
+        priceWarnings.forEach(w => console.log(`    ${w.domain} — was ${w.origEvr} EVR, now ${w.currentEvr} EVR/moment`));
+    }
+    // Always confirm — user has seen the full cost summary above.
+    const proceed = (await askYesNo('\n  Proceed with extend? (yes/y or Enter to cancel): '));
+    if (!isYes(proceed)) {
+        console.log('  Cancelled.');
+        try { await evernodeCtx.tenant.disconnect(); } catch {}
+        try { await evernodeCtx.xrplApi.disconnect(); } catch {}
+        return;
+    }
+    console.log('');
+    // ── End price check ──────────────────────────────────────────
 
     const { tenant, xrplApi } = evernodeCtx;
     const updatedNodes  = loadNodes();

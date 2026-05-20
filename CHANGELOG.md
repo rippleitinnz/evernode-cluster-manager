@@ -1,6 +1,42 @@
 # Evernode Cluster Manager — Changelog
 
 ---
+## v3.4.0 (2026-05-20)
+
+### cluster-manager.js
+
+**Price stability display in host finder (option 7)**
+- Host finder table now shows a `Price Stability` column sourced from the `/hosts/:address/price-history` API endpoint (parallel enrichment, best-effort).
+- Stable hosts show `✓ price stable Nd` — days at current price.
+- Hosts that changed price show direction, magnitude and recency: `▲ +70%  3d ago` or `▼ -15%  12d ago  (2x/30d)`.
+- Frequency suffix `(Nx/30d)` only shown when price changed more than once in 30 days.
+
+**`fmtEVR()` — always EVR, never drops**
+- Previously hosts with very small lease prices displayed as `10drops` or `100drops`. All prices now shown in EVR with consistent decimal places (`0.000010 EVR`, `0.000100 EVR`). Eliminates the visual confusion where `10drops` appeared cheaper than `0.0010 EVR` to users unfamiliar with the drops unit.
+
+**`acquiredLeaseDrops` stored per node at acquire time**
+- `opAddNode` fetches the host's current `leaseDrops` from the API immediately after acquire and stores it as `acquiredLeaseDrops` in `cluster-nodes.json`.
+- `opDeploy` stores `acquiredLeaseDrops` from the cluster-create output.
+- Used at extend time to compare current price against the originally agreed price, independent of the 30-day stability window.
+
+**Price check in `opExtendLease`**
+- Before extending, fetches current price and stability for each target node from the API.
+- Displays current price, price stability, and total EVR cost per node.
+- Compares current price against `acquiredLeaseDrops` — shows `✓ matches acquire price (X EVR)`, `▲ +900% vs X EVR at acquire`, or `▼ -15% vs X EVR at acquire`.
+- Warns explicitly when any host charges more than the original acquire price.
+- Always asks confirmation after showing the full cost summary, regardless of stability.
+
+**Bug fixes**
+- Removed stray `});` syntax error introduced by the PREFERRED_BOOTSTRAP patch (line 1225).
+- Removed redundant `removePeer` CLI call from `opRemoveNode` — peer removal is already handled atomically inside `handleRemoveNode` on all UNL nodes via consensus.
+- Removed redundant `ensureNccBundle` call from `opUpdateContract` after `cp -r node_modules` — the copy already includes the bundle.
+- `reconcileNodes` now preserves nodes with a `name` field (lease data) — only strips nodes without lease data that are no longer in the UNL. Prevents accidental loss of termination data during node churn.
+- `PREFERRED_BOOTSTRAP` is now consumed in `opAddNode` — previously stored but never read.
+
+**`TOOL_VERSION`** bumped to `v3.4.0`.
+
+---
+
 ## v3.3.0 (2026-05-19)
 
 ### cluster-manager.js

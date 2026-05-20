@@ -22,6 +22,16 @@ A single tool for deploying and managing multiple HotPocket smart contract clust
 - Live cluster configuration via Cluster Settings — active peer, bootstrap peer, round time
 - Emergency recovery via Tools menu — deploy recovery contract, destroy cluster, reset credentials
 
+## What's new in v3.4.0
+
+**Price stability in host finder.** The host table now shows a `Price Stability` column. Stable hosts show `✓ price stable Nd`. Hosts that changed price show direction, magnitude and recency — `▲ +70%  3d ago` or `▼ -15%  12d ago  (2x/30d)`. Data sourced from the `/hosts/:address/price-history` endpoint on the Host Discovery API.
+
+**Lease prices always shown in EVR.** Previously small prices displayed as `10drops` or `100drops`, which is confusing — `10drops` looks cheaper than `0.0010 EVR` but is actually 100× cheaper. All prices are now shown in EVR with consistent decimals.
+
+**Acquire price tracking.** When a node is acquired, the price paid (`acquiredLeaseDrops`) is stored in `cluster-nodes.json`. At extend time, the current price is compared against this baseline — independent of the 30-day stability window. A host that raised its price 31 days ago and has been stable since will still show `▲ +900% vs 0.000010 EVR at acquire`.
+
+**Extend lease price check.** Before extending, the tool shows current price, stability, and total EVR cost per node. Always asks confirmation. Warns explicitly when any host is charging more than the original acquire price.
+
 ## What's new in v3.3.0
 
 **Auto-failover when primary peer is unreachable.** Every operation now uses `getActivePeer()` instead of a fixed connection. On failure it tries `PREFERRED_PEER` first, then falls back through all nodes in `cluster-nodes.json` in order until one responds. The active peer updates automatically and is saved for the next session. Previously a dead primary node would block all operations.
@@ -358,7 +368,8 @@ Evernode moment constants (mainnet, stable as of May 2026):
   "peerPort": 22863,
   "createdTimestamp": 1777871676677,
   "lifeMoments": 3,
-  "expiryMoment": 21091
+  "expiryMoment": 21091,
+  "acquiredLeaseDrops": 100
 }
 ```
 
@@ -402,6 +413,8 @@ node client/cluster-manager.js
 ```
 
 ## Key Concepts
+
+**`acquiredLeaseDrops`** — lease price in drops at the time the node was acquired. Used at extend time to detect price changes vs the originally agreed price, independent of the 30-day stability window. Populated automatically on `opAddNode` and `opDeploy`. Null on nodes acquired before v3.4.0.
 
 **Auto-failover:** `getActivePeer()` tries `PREFERRED_PEER` first, then falls back through `cluster-nodes.json` in order. The active peer updates automatically on failover and is saved as `LAST_NODE`.
 
